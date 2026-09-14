@@ -1,0 +1,16 @@
+# Web 服务
+fastapi>=0.110
+uvicorn[standard]>=0.29
+
+# 前端看板
+streamlit>=1.33
+
+# 配置与校验
+pydantic>=2.6
+python-dotenv>=1.0
+
+# LLM 调用（OpenAI 兼容接口）
+requests>=2.31
+
+# 测试
+pytest>=8.0
