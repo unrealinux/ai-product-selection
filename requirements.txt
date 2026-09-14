@@ -3,7 +3,7 @@ fastapi>=0.110
 uvicorn[standard]>=0.29
 
 # 前端看板
-streamlit>=1.33
+streamlit>=1.49
 
 # 配置与校验
 pydantic>=2.6

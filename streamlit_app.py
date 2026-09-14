@@ -18,6 +18,9 @@ st.set_page_config(page_title="AI 选品库", page_icon="🛒", layout="wide")
 
 GRADE_EMOJI = {"S": "🏆", "A": "🥇", "B": "🥈", "C": "🥉", "D": "⛔"}
 
+#: 榜单里各维度得分的列名。margin 单列出来是为了不和真实的「毛利率」百分比撞名
+DIMENSION_COLUMNS = {**DIMENSION_LABELS, "margin": "毛利得分"}
+
 
 @st.cache_resource
 def _bootstrap() -> bool:
@@ -32,11 +35,11 @@ def load_leaderboard(limit: int, category: str | None) -> pd.DataFrame:
     frame = pd.DataFrame(rows)
     frame["等级"] = frame["grade"].map(lambda g: f"{GRADE_EMOJI.get(g, '')}{g}")
     frame["毛利率"] = frame["profit_margin"].map(lambda v: f"{v:.0%}")
-    for key, label in DIMENSION_LABELS.items():
+    for key, label in DIMENSION_COLUMNS.items():
         dims = frame["dimensions"].map(lambda d: d.get(key, 0.0))
         frame[label] = dims.round(1)
     columns = ["title", "category", "price", "cost", "毛利率", "total", "等级",
-               *DIMENSION_LABELS.values(), "advice", "llm_review"]
+               *DIMENSION_COLUMNS.values(), "advice", "llm_review"]
     frame = frame[[col for col in columns if col in frame.columns]]
     return frame.rename(columns={
         "title": "商品", "category": "类目", "price": "售价",
@@ -60,7 +63,7 @@ def page_leaderboard() -> None:
 
     st.dataframe(
         frame,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "总分": st.column_config.ProgressColumn(
@@ -169,7 +172,7 @@ def page_stats() -> None:
         st.caption("各类目平均分")
         st.dataframe(pd.DataFrame(data["top_categories"]).rename(columns={
             "category": "类目", "n": "商品数", "avg_score": "平均分",
-        }), use_container_width=True, hide_index=True)
+        }), width="stretch", hide_index=True)
 
     st.divider()
     st.caption(
