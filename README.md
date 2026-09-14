@@ -22,6 +22,8 @@ AI 选品库把决策拆成两层：
 
 > 关键设计：**大模型不能推翻规则结果**，只能做有限修正。这避免了 LLM 幻觉直接污染排序，让榜单始终可解释。
 
+数据来源既支持本地 JSON，也内置了**抖音精选联盟官方 API** 采集器（见 [接入抖音](#接入抖音精选联盟官方-api)）。
+
 ---
 
 ## 打分模型
@@ -102,6 +104,101 @@ curl -X POST "http://127.0.0.1:8000/score?use_llm=true"
 
 ---
 
+## 接入抖音（精选联盟官方 API）
+
+内置 `douyin` 数据源，直接调用抖店开放平台的选品广场商品搜索接口
+`buyin.kolMaterialsProductsSearch`，走**官方 API**而非页面解析。
+
+- API 调用指南与签名算法：<https://op.jinritemai.com/docs/guide-docs/148/814>
+- 选品商品搜索接口文档：<https://op.jinritemai.com/docs/api-docs/61/1725>
+
+### 1. 申请应用
+
+1. 到 [抖店开放平台](https://op.jinritemai.com/) 注册并创建应用（自用型即可）
+2. 取得 `app_key` / `app_secret`，并在应用里开通精选联盟相关权限
+3. 记录你的 `shop_id`
+
+### 2. 配置并换取 access_token
+
+```dotenv
+APS_DOUYIN_APP_KEY=你的app_key
+APS_DOUYIN_APP_SECRET=你的app_secret
+APS_DOUYIN_SHOP_ID=你的shop_id
+```
+
+```bash
+python scripts/douyin_fetch.py --check    # 检查配置，不发请求
+python scripts/douyin_fetch.py --token    # 自用型应用换取 access_token
+# 把返回的 access_token 写入 .env 的 APS_DOUYIN_ACCESS_TOKEN
+```
+
+### 3. 拉取选品
+
+```bash
+# 试拉取，只看结果不入库
+python scripts/douyin_fetch.py --keywords "咖啡,保温杯" --pages 2 --dry-run
+
+# 正式拉取 + 导入 + 打分
+python scripts/douyin_fetch.py --keywords "咖啡,保温杯" --pages 2 --score
+
+# 只要佣金率 ≥ 10% 的商品（乘 100，即 1000）
+python scripts/douyin_fetch.py --keywords "咖啡" --cos-ratio-min 1000 --score
+```
+
+或直接走 HTTP 接口：
+
+```bash
+curl -X POST http://127.0.0.1:8000/import -H "Content-Type: application/json" -d '{
+  "source": "douyin",
+  "path": "咖啡,保温杯",
+  "options": {"page_size": 20, "max_pages": 2, "search_type": 1},
+  "score": true,
+  "use_llm": false
+}'
+```
+
+### 数据字段来自哪里（重要）
+
+选品接口只提供部分字段，**哪些维度是真实数据、哪些是缺省值**必须说清楚：
+
+| 维度 | 来源 | 说明 |
+| --- | --- | --- |
+| 需求热度 | ✅ 接口 | `sales`（历史总销量）取对数映射，100 万销量 = 100 分 |
+| 竞争度 | ✅ 接口 | 同条件下 `total`（在售商品数）取对数映射 |
+| 毛利率 | ✅ 接口 | `kol_cos_fee` / `kol_cos_ratio`（达人佣金）换算 |
+| 内容传播力 | ⚠️ 代理 | 用 `kol_cos_ratio` 代理（佣金越高越易撬动达人内容） |
+| 重量 | ❌ 缺省 0.5 | 接口未返回，需人工复核 |
+| 复购潜力 | ❌ 缺省 50 | 接口未返回，需人工复核 |
+| 合规风险 | ❌ 缺省 20 | 接口未返回，需人工复核 |
+
+**因此抖音来源的商品有 3 个维度是常数**，总分主要由销量与佣金率驱动。这是当前实现的
+已知局限：`note` 字段会写明「需人工复核」，`app.sources.douyin.FIELD_PROVENANCE`
+也把每个维度的来源写进了代码，可用 `scripts/douyin_fetch.py --check` 打印出来。
+
+三条与官方口径相关的换算约定（代码已处理）：
+
+- `price`、`kol_cos_fee`、`coupon_price` 单位是**分**，已换算成元
+- `kol_cos_ratio` 是**百分数乘 100**（`10.00` 表示 10%），已除以 100
+- `cost` 被反推为「售价 − 达人佣金」，因此算出的毛利率**等于达人佣金率** —— 这是
+  **分销带货视角**。自营商家请自行覆盖 `cost`
+
+### 签名实现
+
+严格按官方文档第六节实现，并用**官方样例字符串**做了逐字断言
+（`tests/test_douyin.py::test_sign_string_matches_official_doc_example`）：
+
+1. `param_json` 键按字母升序、分隔符无空格；转义 `&`、`<`、`>` 与退格符
+2. 全部请求参数按字母排序，其中 **`access_token` 与 `sign_method` 不参与加密**
+3. 拼接为 `key1value1key2value2...`
+4. 把 **`app_secret` 拼在字符串两端**
+5. 对结果做 HMAC-SHA256（密钥同为 `app_secret`）或 MD5，取小写十六进制
+
+> 几个容易踩的坑，代码里都已处理：`param_json` 走请求 body 而其余公共参数走 query；
+> 成功码是 `10000` 而非 `0`；`token.create` 不携带 `access_token`；
+> 官方标记 `sign_method` 默认 `md5` 但推荐迁到 `hmac-sha256`，本项目默认用后者。
+
+---
+
 ## API 一览
 
 | 方法 | 路径 | 说明 |
@@ -115,6 +212,8 @@ curl -X POST "http://127.0.0.1:8000/score?use_llm=true"
 | `POST` | `/score` | 全库打分 |
 | `GET` | `/leaderboard` | 选品榜单（按总分倒序） |
 | `GET` | `/stats` | 看板统计 |
+| `GET` | `/douyin/status` | 抖音数据源配置状态 + 官返回码释义 |
+| `POST` | `/douyin/token` | 换取 access_token（调试用，结果不落盘） |
 
 示例：
 
@@ -167,17 +266,29 @@ curl -X POST http://127.0.0.1:8000/import -d '{"source":"json","path":"my_produc
 
 ### 接入真实渠道
 
-实现新的采集源即可，打分链路完全复用：
+内置的 `douyin` 数据源就在 `app/sources/douyin.py`，可直接当作模板：实现 `fetch()`
+返回 `list[ProductIn]`，打分链路完全复用。
 
 ```python
-# app/crawler.py
+# app/sources/my_platform.py
+from ..crawler import Source
+from ..models import ProductIn
+
 class MySource(Source):
-    name = "my-source"
+    name = "my-platform"
+
+    def __init__(self, keywords=None, **options):
+        ...
 
     def fetch(self) -> list[ProductIn]:
         return [ProductIn(title=..., price=..., ...)]
+```
 
-SOURCES[MySource.name] = MySource
+然后在 `app/crawler.py` 的 `LAZY_SOURCES` 里登记名字，即可用统一入口调用：
+
+```python
+source = crawler.get_source("my-platform", "关键词1,关键词2", {"page_size": 20})
+products = source.fetch()
 ```
 
 ---
@@ -189,16 +300,22 @@ ai-product-selection/
 ├── app/
 │   ├── api.py         # FastAPI 路由
 │   ├── config.py      # 环境变量与权重配置
-│   ├── crawler.py     # 候选商品采集适配器
+│   ├── crawler.py     # 采集源注册表（延迟加载第三方源）
 │   ├── db.py          # SQLite 存储层
 │   ├── llm.py         # OpenAI 兼容大模型接入 + 降级
 │   ├── models.py      # Pydantic 数据模型
 │   ├── scoring.py     # 规则打分引擎（纯函数，可单测）
-│   └── service.py     # 业务编排
+│   ├── service.py     # 业务编排
+│   └── sources/
+│       └── douyin.py  # 抖音精选联盟官方 API 客户端 + 字段映射
 ├── data/
 │   └── sample_products.json
-├── scripts/seed_data.py
-├── tests/test_scoring.py
+├── scripts/
+│   ├── douyin_fetch.py
+│   └── seed_data.py
+├── tests/
+│   ├── test_douyin.py
+│   └── test_scoring.py
 ├── streamlit_app.py
 ├── conftest.py
 ├── requirements.txt
@@ -213,7 +330,9 @@ pytest -q
 
 ## 后续规划
 
-- [ ] 采集器：1688 / 抖音 / 亚马逊榜单
+- [x] 采集器：抖音精选联盟（官方 API，`buyin.kolMaterialsProductsSearch`）
+- [ ] 采集器：1688 / 亚马逊榜单
+- [ ] 补齐抖音商品的重量 / 复购 / 合规维度（接入商品详情 API 或人工补录）
 - [ ] 用 LLM 自动估算 `heat`、`virality` 等主观维度，替代手工填写
 - [ ] 权重在线调参与 A/B 对比
 - [ ] 选品结果导出为采购单 / 上架任务

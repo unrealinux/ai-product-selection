@@ -74,12 +74,41 @@ class Settings:
     api_host: str = field(default_factory=lambda: os.getenv("APS_API_HOST", "127.0.0.1"))
     api_port: int = field(default_factory=lambda: _env_int("APS_API_PORT", 8000))
 
+    # ---- 抖音开放平台（抖店 / 精选联盟）----
+    # 文档：https://op.jinritemai.com/docs/guide-docs/148/814
+    douyin_base_url: str = field(
+        default_factory=lambda: os.getenv(
+            "APS_DOUYIN_BASE_URL", "https://openapi-fxg.jinritemai.com"
+        ).rstrip("/")
+    )
+    douyin_app_key: str = field(default_factory=lambda: os.getenv("APS_DOUYIN_APP_KEY", ""))
+    douyin_app_secret: str = field(
+        default_factory=lambda: os.getenv("APS_DOUYIN_APP_SECRET", "")
+    )
+    douyin_access_token: str = field(
+        default_factory=lambda: os.getenv("APS_DOUYIN_ACCESS_TOKEN", "")
+    )
+    douyin_shop_id: str = field(default_factory=lambda: os.getenv("APS_DOUYIN_SHOP_ID", ""))
+    douyin_sign_method: str = field(
+        default_factory=lambda: os.getenv("APS_DOUYIN_SIGN_METHOD", "hmac-sha256").lower()
+    )
+    douyin_timeout: int = field(default_factory=lambda: _env_int("APS_DOUYIN_TIMEOUT", 30))
+
     weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_WEIGHTS))
 
     @property
     def llm_ready(self) -> bool:
         """LLM 是否具备可用条件。"""
         return bool(self.llm_enabled and self.llm_base_url and self.llm_api_key)
+
+    @property
+    def douyin_ready(self) -> bool:
+        """抖音数据源是否具备可用条件。"""
+        return bool(
+            self.douyin_app_key
+            and self.douyin_app_secret
+            and self.douyin_access_token
+        )
 
 
 settings = Settings()

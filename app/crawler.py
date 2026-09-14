@@ -84,15 +84,40 @@ SOURCES: dict[str, type[Source]] = {
     JsonFileSource.name: JsonFileSource,
 }
 
+#: 需要第三方依赖或凭据、延迟导入的数据源（名字 → 获取实例的工厂）
+LAZY_SOURCES = ("douyin",)
 
-def get_source(name: str, path: Path | str | None = None) -> Source:
-    """按名字获取采集源。"""
-    if name not in SOURCES:
-        raise KeyError(f"未知数据源 {name!r}，可选：{', '.join(SOURCES)}")
+
+def _build_douyin(path: Path | str | None, options: dict):
+    """构造抖音数据源（延迟导入，未配置凭据时也能正常 import 本项目）。"""
+    from .sources.douyin import DouyinSource
+
+    options = dict(options)
+    if path and "keywords" not in options:
+        options["keywords"] = [item.strip() for item in str(path).split(",") if item.strip()]
+    return DouyinSource(**options)
+
+
+def get_source(name: str, path: Path | str | None = None,
+               options: dict | None = None) -> Source:
+    """按名字获取采集源。
+
+    Args:
+        name: 数据源名字，可选 ``sample`` / ``json`` / ``douyin``。
+        path: ``json`` 源的文件路径；``douyin`` 源可传逗号分隔的关键词。
+        options: 数据源构造参数，例如 ``{"page_size": 20, "max_pages": 2}``。
+    """
+    if name not in SOURCES and name not in LAZY_SOURCES:
+        available = ", ".join([*SOURCES, *LAZY_SOURCES])
+        raise KeyError(f"未知数据源 {name!r}，可选：{available}")
+
+    if name in LAZY_SOURCES:
+        return _build_douyin(path, options or {})
+
     cls = SOURCES[name]
     if cls is JsonFileSource:
         if path is None:
-            raise ValueError("json 数据源必须提供 --path")
+            raise ValueError("json 数据源必须提供 path")
         return cls(path)
     return cls(path) if path else cls()
 

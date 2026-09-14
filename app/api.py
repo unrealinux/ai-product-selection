@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from . import __version__, crawler, db, llm, service
 from .config import settings
 from .models import Product, ProductIn
+from .sources.douyin import ERROR_CODES, DouyinClient, DouyinError
 
 app = FastAPI(
     title="AI 选品库",
@@ -27,8 +28,12 @@ app = FastAPI(
 class ImportRequest(BaseModel):
     """导入请求。"""
 
-    source: str = Field("sample", description="数据源：sample / json")
-    path: Optional[str] = Field(None, description="json 数据源的文件路径")
+    source: str = Field("sample", description="数据源：sample / json / douyin")
+    path: Optional[str] = Field(None, description="json 源的文件路径；douyin 源可传逗号分隔关键词")
+    options: dict[str, Any] = Field(
+        default_factory=dict,
+        description='数据源构造参数，如 {"page_size": 20, "max_pages": 2}',
+    )
     score: bool = Field(True, description="导入后是否立即打分")
     use_llm: bool = Field(True, description="是否启用大模型点评")
 
@@ -81,13 +86,19 @@ def create_product(product: ProductIn) -> Product:
 def import_products(payload: ImportRequest) -> ImportResponse:
     service.prepare_db()
     try:
-        source = crawler.get_source(payload.source, payload.path)
+        source = crawler.get_source(payload.source, payload.path, payload.options)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except DouyinError as exc:
+        # 凭据缺失 / 签名失败 / 限流等，都属于调用方可修复的问题
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    products = source.fetch()
+    try:
+        products = source.fetch()
+    except DouyinError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     saved = service.import_products(products)
 
     items: list[dict[str, Any]] = []
@@ -126,6 +137,56 @@ def leaderboard(
 @app.get("/stats", summary="看板统计")
 def stats() -> dict[str, Any]:
     return service.dashboard_stats()
+
+
+# --------------------------------------------------------------------------- #
+# 抖音（抖店）数据源
+# --------------------------------------------------------------------------- #
+
+class DouyinTokenRequest(BaseModel):
+    """换取 access_token 的请求。
+
+    自用型应用只需 ``shop_id``；店铺授权码模式传 ``code``。
+    """
+
+    shop_id: Optional[str] = Field(None, description="自用型应用必填")
+    code: Optional[str] = Field(None, description="授权码模式必填")
+
+
+@app.get("/douyin/status", summary="抖音数据源配置状态")
+def douyin_status() -> dict[str, Any]:
+    return {
+        "configured": settings.douyin_ready,
+        "has_app_key": bool(settings.douyin_app_key),
+        "has_app_secret": bool(settings.douyin_app_secret),
+        "has_access_token": bool(settings.douyin_access_token),
+        "shop_id": settings.douyin_shop_id or None,
+        "sign_method": settings.douyin_sign_method,
+        "base_url": settings.douyin_base_url,
+        "error_codes": ERROR_CODES,
+    }
+
+
+@app.post("/douyin/token", summary="换取 access_token（结果不落盘）")
+def douyin_token(payload: DouyinTokenRequest) -> dict[str, Any]:
+    """仅供调试；生产环境请把 token 写入配置，不要每次请求都重新换取。"""
+    try:
+        client = DouyinClient.from_settings()
+        data = (
+            client.create_token_by_code(payload.code)
+            if payload.code
+            else client.create_self_token(payload.shop_id)
+        )
+    except DouyinError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    token = str(data.get("access_token") or "")
+    return {
+        "access_token_preview": token[:8] + "..." if token else None,
+        "expires_in": data.get("expires_in"),
+        "refresh_token_present": bool(data.get("refresh_token")),
+        "hint": "请把 access_token 写入 .env 的 APS_DOUYIN_ACCESS_TOKEN",
+    }
 
 
 def main() -> None:  # pragma: no cover
