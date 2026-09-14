@@ -12,7 +12,13 @@ import streamlit as st
 from app import __version__, crawler, db, llm, service
 from app.config import DIMENSION_LABELS, settings
 from app.models import ProductIn
-from app.scoring import grade_of
+from app.sources.douyin import (
+    FIELD_PROVENANCE,
+    MAX_PAGE_SIZE,
+    DouyinAPIError,
+    DouyinConfigError,
+    DouyinSource,
+)
 
 st.set_page_config(page_title="AI 选品库", page_icon="🛒", layout="wide")
 
@@ -20,6 +26,15 @@ GRADE_EMOJI = {"S": "🏆", "A": "🥇", "B": "🥈", "C": "🥉", "D": "⛔"}
 
 #: 榜单里各维度得分的列名。margin 单列出来是为了不和真实的「毛利率」百分比撞名
 DIMENSION_COLUMNS = {**DIMENSION_LABELS, "margin": "毛利得分"}
+
+#: 抖音接口 search_type 取值（官方文档 api-docs/61/1725）
+SEARCH_TYPE_LABELS = {
+    0: "默认排序",
+    1: "历史销量",
+    2: "价格",
+    3: "佣金金额",
+    4: "佣金比例",
+}
 
 
 @st.cache_resource
@@ -109,6 +124,197 @@ def page_import() -> None:
             st.rerun()
 
 
+DOUYIN_ENV_SNIPPET = """APS_DOUYIN_APP_KEY=你的app_key
+APS_DOUYIN_APP_SECRET=你的app_secret
+APS_DOUYIN_SHOP_ID=你的shop_id
+APS_DOUYIN_ACCESS_TOKEN=换取后填入
+"""
+
+
+def render_provenance() -> None:
+    """把「哪些维度来自接口、哪些是缺省值」摆在明面上。"""
+    with st.expander("数据可信度：哪些维度来自接口，哪些是缺省值"):
+        st.dataframe(
+            pd.DataFrame([{"维度": key, "来源": value} for key, value in FIELD_PROVENANCE.items()]),
+            width="stretch",
+            hide_index=True,
+        )
+        st.caption(
+            "重量 / 复购 / 合规三项接口未提供，取缺省值。抖音来源商品的总分主要由"
+            "销量与佣金率驱动，这三项需人工复核后再依赖排序。"
+        )
+
+
+def render_douyin_error_hint(exc: DouyinAPIError) -> None:
+    """把官方返回码翻译成可执行的下一步。"""
+    if exc.expired_token:
+        st.info(
+            "access_token 已失效。执行 `python scripts/douyin_fetch.py --token` "
+            "换取新 token 后更新 .env 的 `APS_DOUYIN_ACCESS_TOKEN`。"
+        )
+    elif exc.code == 9:
+        st.info("触发平台限流，请减少翻页数 / 每页条数，或稍后重试。")
+    elif exc.code in {30001, 30004}:
+        st.info("认证失败。请核对 .env 中 `APS_DOUYIN_APP_KEY` / `APS_DOUYIN_APP_SECRET`。")
+    elif exc.code == 11:
+        st.info("签名校验失败。请确认 `APS_DOUYIN_SIGN_METHOD` 与平台应用配置一致。")
+    elif exc.code in {40004, 50002}:
+        st.info("业务参数被拒绝。请检查排序方式、佣金率区间、类目 ID 是否合法。")
+
+
+def douyin_preview_frame(products: list[ProductIn]) -> pd.DataFrame:
+    """拉取结果预览表。"""
+    rows = []
+    for item in products:
+        margin = (item.price - item.cost) / item.price if item.price else 0.0
+        rows.append({
+            "商品": item.title,
+            "类目": item.category,
+            "售价(元)": item.price,
+            "商家实收(元)": item.cost,
+            "佣金率": f"{margin:.1%}",
+            "需求热度": round(item.heat, 1),
+            "竞争度": round(item.competition, 1),
+            "传播潜力": round(item.virality, 1),
+            "链接": item.url,
+        })
+    return pd.DataFrame(rows)
+
+
+def page_douyin() -> None:
+    st.subheader("抖音精选联盟拉取")
+    st.caption(
+        "官方 API `buyin.kolMaterialsProductsSearch` ｜ "
+        "文档 https://op.jinritemai.com/docs/api-docs/61/1725"
+    )
+
+    if not settings.douyin_ready:
+        st.warning("未检测到抖音凭据，暂时无法拉取。")
+        with st.expander("如何配置（三步）", expanded=True):
+            st.markdown(
+                "**1. 申请应用** —— 到 https://op.jinritemai.com/ 创建应用（自用型即可），"
+                "取得 `app_key` / `app_secret`，并开通精选联盟相关权限。"
+            )
+            st.markdown("**2. 填写 `.env`**")
+            st.code(DOUYIN_ENV_SNIPPET, language="dotenv")
+            st.markdown("**3. 换取 access_token** —— 填好前两项与 shop_id 后执行：")
+            st.code("python scripts/douyin_fetch.py --token", language="bash")
+            st.caption("把返回的 access_token 写入 `.env` 的 `APS_DOUYIN_ACCESS_TOKEN`，然后刷新本页。")
+        render_provenance()
+        return
+
+    st.success(
+        f"已配置：app_key `{settings.douyin_app_key[:6]}…` ｜ "
+        f"shop_id `{settings.douyin_shop_id or '未设置'}` ｜ "
+        f"签名 `{settings.douyin_sign_method}`"
+    )
+
+    with st.form("douyin_fetch_form"):
+        keywords = st.text_input(
+            "关键词（逗号分隔；留空则按全量召回，竞争度会失真）",
+            value="", placeholder="例如：咖啡,保温杯",
+        )
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            pages = st.number_input("每个关键词翻页数", 1, 20, 1, step=1)
+            page_size = st.number_input(
+                f"每页条数（官方上限 {MAX_PAGE_SIZE}）", 1, MAX_PAGE_SIZE, MAX_PAGE_SIZE, step=1
+            )
+        with col2:
+            search_type = st.selectbox(
+                "召回排序", options=list(SEARCH_TYPE_LABELS),
+                format_func=lambda key: SEARCH_TYPE_LABELS[key], index=1,
+            )
+            order = st.radio("排序方向", ["降序", "升序"], horizontal=True)
+        with col3:
+            cos_ratio_min_pct = st.number_input("最低佣金率（%，0=不限）", 0.0, 80.0, 0.0, step=0.5)
+            first_cids_raw = st.text_input("一级类目 ID（逗号分隔，可留空）", value="")
+
+        col4, col5, col6 = st.columns(3)
+        with col4:
+            only_in_stock = st.checkbox("仅保留在售商品", value=True)
+        with col5:
+            score_now = st.checkbox("导入后立即打分", value=True)
+        with col6:
+            use_llm = st.checkbox("启用大模型点评", value=False, disabled=not llm.is_available())
+
+        submitted = st.form_submit_button("开始拉取", type="primary")
+
+    if submitted:
+        keywords_list = [item.strip() for item in keywords.split(",") if item.strip()]
+        first_cids = [int(c) for c in first_cids_raw.replace("，", ",").split(",")
+                      if c.strip().isdigit()]
+        source = DouyinSource(
+            keywords_list,
+            page_size=int(page_size),
+            max_pages=int(pages),
+            search_type=int(search_type),
+            sort_type=0 if order == "升序" else 1,
+            first_cids=first_cids or None,
+            cos_ratio_min=int(cos_ratio_min_pct * 100) or None,
+            only_in_stock=only_in_stock,
+        )
+        try:
+            with st.spinner("正在调用抖店开放平台…"):
+                products = source.fetch()
+        except DouyinConfigError as exc:
+            st.error(f"配置错误：{exc}")
+            return
+        except DouyinAPIError as exc:
+            st.error(f"接口调用失败：{exc}")
+            render_douyin_error_hint(exc)
+            return
+
+        st.session_state["douyin_products"] = products
+        if not products:
+            st.session_state["douyin_flash"] = (
+                "info", "没有拉到商品。建议填写关键词缩小范围，或放宽佣金率限制。"
+            )
+            st.rerun()
+        elif not score_now:
+            st.session_state["douyin_flash"] = ("info", f"已拉取 {len(products)} 条（未入库）。")
+            st.rerun()
+        else:
+            saved = service.import_products(products)
+            results = service.score_all(use_llm=use_llm)
+            st.session_state["douyin_flash"] = (
+                "success",
+                f"已拉取 {len(products)} 条，入库 {len(saved)} 条，完成打分 {len(results)} 条。",
+            )
+            st.rerun()
+
+    flash = st.session_state.pop("douyin_flash", None)
+    if flash:
+        getattr(st, flash[0])(flash[1])
+
+    products = st.session_state.get("douyin_products") or []
+    if products:
+        st.markdown(f"#### 拉取结果（{len(products)} 条）")
+        frame = douyin_preview_frame(products)
+        st.dataframe(frame, width="stretch", hide_index=True)
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.download_button(
+                "导出 CSV", frame.to_csv(index=False).encode("utf-8-sig"),
+                file_name="douyin_products.csv", mime="text/csv",
+            )
+        with col_b:
+            if st.button("清空本次结果"):
+                st.session_state.pop("douyin_products", None)
+                st.rerun()
+        st.caption(
+            "「商家实收」= 售价 − 达人佣金；「佣金率」= 达人佣金 / 售价。"
+            "这是分销带货视角的口径，自营请自行覆盖成本。"
+        )
+
+    render_provenance()
+    st.divider()
+    st.caption(
+        "也可走命令行：`python scripts/douyin_fetch.py --keywords \"咖啡\" --pages 2 --dry-run`"
+        " ｜ `--check` 打印配置状态与维度来源"
+    )
+
+
 def page_create() -> None:
     st.subheader("商品录入")
     with st.form("create_product"):
@@ -186,14 +392,16 @@ def main() -> None:
     st.title("🛒 AI 选品库")
     st.caption("规则引擎 + 大模型的多维度选品打分与排序")
 
-    tabs = st.tabs(["📊 选品榜单", "📥 数据导入", "➕ 商品录入", "📈 数据概览"])
+    tabs = st.tabs(["📊 选品榜单", "📥 数据导入", "🎯 抖音拉取", "➕ 商品录入", "📈 数据概览"])
     with tabs[0]:
         page_leaderboard()
     with tabs[1]:
         page_import()
     with tabs[2]:
-        page_create()
+        page_douyin()
     with tabs[3]:
+        page_create()
+    with tabs[4]:
         page_stats()
 
 
