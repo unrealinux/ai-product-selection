@@ -94,6 +94,14 @@ class Settings:
     )
     douyin_timeout: int = field(default_factory=lambda: _env_int("APS_DOUYIN_TIMEOUT", 30))
 
+    # ---- 维度补齐（重量 / 复购 / 合规，接口未提供）----
+    enrich_cache_path: Path = field(
+        default_factory=lambda: BASE_DIR
+        / os.getenv("APS_ENRICH_CACHE", "data/cache/llm_estimates.json")
+    )
+    enrich_batch_size: int = field(default_factory=lambda: _env_int("APS_ENRICH_BATCH_SIZE", 8))
+    enrich_detail_limit: int = field(default_factory=lambda: _env_int("APS_ENRICH_DETAIL_LIMIT", 0))
+
     weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_WEIGHTS))
 
     @property

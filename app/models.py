@@ -12,6 +12,9 @@ class ProductIn(BaseModel):
     """新增/导入商品时的入参。"""
 
     title: str = Field(..., min_length=1, max_length=200, description="商品标题")
+    external_id: str = Field(
+        "", max_length=64, description="来源平台的商品 ID（如抖音 product_id）"
+    )
     category: str = Field("未分类", max_length=64, description="类目")
     price: float = Field(0.0, ge=0, description="售价（元）")
     cost: float = Field(0.0, ge=0, description="成本（元）")

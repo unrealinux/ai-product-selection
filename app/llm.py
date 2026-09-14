@@ -74,20 +74,36 @@ def chat(messages: list[dict[str, str]], temperature: float = 0.3) -> Optional[s
         return None
 
 
-def _extract_json(text: str) -> Optional[dict[str, Any]]:
-    """从模型输出中稳健地提取 JSON 对象。"""
-    text = text.strip()
-    text = re.sub(r"^```(?:json)?|```$", "", text, flags=re.MULTILINE).strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+def extract_json(text: str) -> Any:
+    """从模型输出中稳健地提取 JSON 对象或数组。
+
+    容忍 markdown 代码围栏与前后多余文字；解析失败返回 ``None``。
+    """
+    if not text:
+        return None
+
+    cleaned = re.sub(r"```[a-zA-Z]*", "", text).replace("```", "").strip()
+    for candidate in (cleaned, text):
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+    for pattern in (r"\{.*\}", r"\[.*\]"):
+        match = re.search(pattern, text, flags=re.DOTALL)
         if not match:
-            return None
+            continue
         try:
             return json.loads(match.group(0))
         except json.JSONDecodeError:
-            return None
+            continue
+    return None
+
+
+def _extract_json(text: str) -> Optional[dict[str, Any]]:
+    """从模型输出中提取 JSON 对象（非对象时返回 None）。"""
+    data = extract_json(text)
+    return data if isinstance(data, dict) else None
 
 
 def review_product(product, dimensions: dict[str, float],

@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import service  # noqa: E402
 from app.config import settings  # noqa: E402
+from app.enrich import enrich  # noqa: E402
 from app.sources.douyin import (  # noqa: E402
     ERROR_CODES,
     FIELD_PROVENANCE,
@@ -63,6 +64,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--score", action="store_true", help="导入后立即打分")
     parser.add_argument("--use-llm", action="store_true", help="打分时附带大模型点评")
     parser.add_argument("--top", type=int, default=10, help="打印前 N 条（默认 10）")
+
+    parser.add_argument(
+        "--enrich", action="store_true",
+        help="用大模型估算接口缺失的重量/复购/合规（需已配置 APS_LLM_*）",
+    )
+    parser.add_argument(
+        "--enrich-detail", type=int, default=0, metavar="N",
+        help="额外用商品详情接口补重量，最多 N 个（仅对已授权店铺自己的商品有效）",
+    )
+    parser.add_argument("--enrich-batch", type=int, default=None, help="大模型估算的批大小")
+    parser.add_argument("--refresh-estimates", action="store_true", help="忽略估算缓存重新估算")
     return parser.parse_args()
 
 
@@ -86,6 +98,8 @@ def print_config_status() -> None:
     print("\n=== 维度数据来源说明 ===")
     for field, desc in FIELD_PROVENANCE.items():
         print(f"  {field:<16} {desc}")
+    print("\n  可用 --enrich 让大模型估算重量/复购/合规；")
+    print("  --enrich-detail N 会额外尝试商品详情接口（仅对自己店铺的商品有效）。")
 
 
 def main() -> int:
@@ -151,13 +165,30 @@ def main() -> int:
         return 0
 
     print(f"\n共获取 {len(products)} 个商品。")
+
+    if args.enrich or args.enrich_detail:
+        products, enrich_report = enrich(
+            products,
+            client=client if args.enrich_detail else None,
+            use_llm=args.enrich,
+            detail_limit=args.enrich_detail,
+            batch_size=args.enrich_batch,
+            use_cache=not args.refresh_estimates,
+        )
+        print(f"维度补齐：{enrich_report.summary()}")
+        for note in enrich_report.notes:
+            print(f"  注：{note}")
+        for error in enrich_report.errors:
+            print(f"  错误：{error}", file=sys.stderr)
+
     if args.dry_run:
-        print(f"\n{'#':<4}{'售价':<10}{'毛利率':<10}{'热度':<8}{'竞争':<8}{'商品'}")
-        print("-" * 78)
+        print(f"\n{'#':<4}{'售价':<10}{'毛利率':<10}{'重量kg':<10}{'复购':<8}{'合规':<8}{'商品'}")
+        print("-" * 92)
         for index, item in enumerate(products[: args.top], start=1):
             margin = (item.price - item.cost) / item.price if item.price else 0
             print(f"{index:<6}{item.price:<12.2f}{margin:<12.0%}"
-                  f"{item.heat:<10.1f}{item.competition:<10.1f}{item.title[:26]}")
+                  f"{item.weight_kg:<12.2f}{item.repurchase:<10.0f}"
+                  f"{item.compliance_risk:<10.0f}{item.title[:24]}")
         print("\n（--dry-run 模式，未写入数据库）")
         return 0
 

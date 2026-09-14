@@ -361,6 +361,7 @@ def test_to_product_unit_conversion_fen_to_yuan():
     product = to_product(RAW_PRODUCT, competition_total=1000)
 
     assert isinstance(product, ProductIn)
+    assert product.external_id == "3400312511185213726"
     assert product.price == pytest.approx(1.00)     # 100 分
     assert product.cost == pytest.approx(0.90)      # 100 - 10 分
     assert product.title == "测试商品"

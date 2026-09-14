@@ -11,6 +11,7 @@ import streamlit as st
 
 from app import __version__, crawler, db, llm, service
 from app.config import DIMENSION_LABELS, settings
+from app.enrich import PROVENANCE_SEP, enrich
 from app.models import ProductIn
 from app.sources.douyin import (
     FIELD_PROVENANCE,
@@ -140,8 +141,9 @@ def render_provenance() -> None:
             hide_index=True,
         )
         st.caption(
-            "重量 / 复购 / 合规三项接口未提供，取缺省值。抖音来源商品的总分主要由"
-            "销量与佣金率驱动，这三项需人工复核后再依赖排序。"
+            "重量 / 复购 / 合规三项接口未提供。不补齐时它们取缺省值，抖音来源商品的总分"
+            "主要由销量与佣金率驱动；勾选「补齐重量/复购/合规」后会由大模型估算，"
+            "但**仍是估算值**，需人工复核后再依赖排序。"
         )
 
 
@@ -167,15 +169,20 @@ def douyin_preview_frame(products: list[ProductIn]) -> pd.DataFrame:
     rows = []
     for item in products:
         margin = (item.price - item.cost) / item.price if item.price else 0.0
+        note = item.note or ""
+        provenance = note.split(PROVENANCE_SEP, 1)[1] if PROVENANCE_SEP in note else ""
         rows.append({
             "商品": item.title,
             "类目": item.category,
             "售价(元)": item.price,
             "商家实收(元)": item.cost,
             "佣金率": f"{margin:.1%}",
+            "重量(kg)": item.weight_kg,
+            "复购潜力": round(item.repurchase, 1),
+            "合规风险": round(item.compliance_risk, 1),
             "需求热度": round(item.heat, 1),
             "竞争度": round(item.competition, 1),
-            "传播潜力": round(item.virality, 1),
+            "数据说明": provenance,
             "链接": item.url,
         })
     return pd.DataFrame(rows)
@@ -238,6 +245,18 @@ def page_douyin() -> None:
         with col6:
             use_llm = st.checkbox("启用大模型点评", value=False, disabled=not llm.is_available())
 
+        col7, col8 = st.columns([1, 2])
+        with col7:
+            enrich_llm = st.checkbox(
+                "补齐重量/复购/合规", value=False, disabled=not llm.is_available(),
+                help="接口不返回这三个字段，用大模型按标题+类目估算。结果会写进数据说明。",
+            )
+        with col8:
+            enrich_detail_limit = st.number_input(
+                "额外用商品详情接口补重量（仅自己店铺的商品有效，0=不试）",
+                0, 100, 0, step=5,
+            )
+
         submitted = st.form_submit_button("开始拉取", type="primary")
 
     if submitted:
@@ -265,6 +284,25 @@ def page_douyin() -> None:
             render_douyin_error_hint(exc)
             return
 
+        st.session_state.pop("douyin_enrich", None)
+        if products and (enrich_llm or enrich_detail_limit):
+            try:
+                with st.spinner("正在补齐重量 / 复购 / 合规…"):
+                    products, enrich_report = enrich(
+                        products,
+                        client=source.client if enrich_detail_limit else None,
+                        use_llm=enrich_llm,
+                        detail_limit=int(enrich_detail_limit),
+                    )
+            except Exception as exc:  # noqa: BLE001 - 补齐失败不应弄丢已拉到的数据
+                st.warning(f"维度补齐失败，保留原始数据：{exc}")
+            else:
+                st.session_state["douyin_enrich"] = {
+                    "summary": enrich_report.summary(),
+                    "notes": list(enrich_report.notes),
+                    "errors": list(enrich_report.errors),
+                }
+
         st.session_state["douyin_products"] = products
         if not products:
             st.session_state["douyin_flash"] = (
@@ -287,6 +325,14 @@ def page_douyin() -> None:
     if flash:
         getattr(st, flash[0])(flash[1])
 
+    enrich_info = st.session_state.get("douyin_enrich")
+    if enrich_info:
+        st.info(f"维度补齐：{enrich_info['summary']}")
+        for note in enrich_info["notes"]:
+            st.caption(f"注：{note}")
+        for error in enrich_info["errors"]:
+            st.caption(f"⚠️ {error}")
+
     products = st.session_state.get("douyin_products") or []
     if products:
         st.markdown(f"#### 拉取结果（{len(products)} 条）")
@@ -301,10 +347,11 @@ def page_douyin() -> None:
         with col_b:
             if st.button("清空本次结果"):
                 st.session_state.pop("douyin_products", None)
+                st.session_state.pop("douyin_enrich", None)
                 st.rerun()
         st.caption(
             "「商家实收」= 售价 − 达人佣金；「佣金率」= 达人佣金 / 售价。"
-            "这是分销带货视角的口径，自营请自行覆盖成本。"
+            "这是分销带货视角的口径，自营请自行覆盖成本。右侧「数据说明」标明每个维度的实际来源。"
         )
 
     render_provenance()

@@ -16,6 +16,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS products (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     title           TEXT    NOT NULL,
+    external_id     TEXT    NOT NULL DEFAULT '',
     category        TEXT    NOT NULL DEFAULT '未分类',
     price           REAL    NOT NULL DEFAULT 0,
     cost            REAL    NOT NULL DEFAULT 0,
@@ -50,9 +51,14 @@ CREATE INDEX IF NOT EXISTS idx_scores_total   ON scores(total DESC);
 """
 
 PRODUCT_FIELDS = (
-    "title", "category", "price", "cost", "source", "url",
+    "title", "external_id", "category", "price", "cost", "source", "url",
     "heat", "competition", "weight_kg", "repurchase",
     "compliance_risk", "virality", "note",
+)
+
+#: 建表后新增的列（列名, ALTER TABLE 片段）。旧库启动时自动补列，避免手动迁移
+COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("external_id", "external_id TEXT NOT NULL DEFAULT ''"),
 )
 
 
@@ -81,10 +87,19 @@ def session(db_path: Path | str | None = None) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    """为已存在的旧库补齐后加的列（幂等）。"""
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(products)")}
+    for column, ddl in COLUMN_MIGRATIONS:
+        if column not in existing:
+            conn.execute(f"ALTER TABLE products ADD COLUMN {ddl}")
+
+
 def init_db(db_path: Path | str | None = None) -> None:
-    """初始化表结构（幂等）。"""
+    """初始化表结构（幂等），并补齐旧库缺失的列。"""
     with session(db_path) as conn:
         conn.executescript(SCHEMA)
+        _apply_migrations(conn)
 
 
 def _row_to_product(row: sqlite3.Row) -> Product:

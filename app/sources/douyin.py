@@ -78,10 +78,18 @@ MAX_PAGE_SIZE = 20
 
 #: 选品广场商品搜索接口
 M_SEARCH_PRODUCTS = "buyin.kolMaterialsProductsSearch"
+#: 商品详情接口（注意：只能查已授权店铺自己的商品）
+M_PRODUCT_DETAIL = "product.detail"
 #: 换取 access_token 接口
 M_TOKEN_CREATE = "token.create"
 #: 刷新 access_token 接口
 M_TOKEN_REFRESH = "token.refresh"
+
+#: product.detail 的 weight_unit 枚举（官方：0-kg, 1-g）
+WEIGHT_UNIT_TO_KG: dict[int, float] = {0: 1.0, 1: 0.001}
+
+#: SKU 级 delivery_infos.info_unit 枚举（官方：支持 mg/g/kg）
+DETAIL_UNIT_TO_KG: dict[str, float] = {"kg": 1.0, "g": 0.001, "mg": 0.000001}
 
 # ---- 维度推导参数（灵感来自接口返回字段，属于启发式映射，非官方口径）----
 
@@ -98,9 +106,9 @@ FIELD_PROVENANCE: dict[str, str] = {
     "competition": "接口 total（同条件下在售商品数）取对数映射，需配合 title/类目筛选才有意义",
     "margin": "接口 kol_cos_fee / kol_cos_ratio（达人佣金）换算",
     "virality": "接口 kol_cos_ratio 代理指标（佣金越高越易撬动达人内容）",
-    "weight_kg": "接口未提供，缺省 0.5，需人工复核",
-    "repurchase": "接口未提供，缺省 50，需人工复核",
-    "compliance_risk": "接口未提供，缺省 20，需人工复核",
+    "weight_kg": "接口未提供，缺省 0.5；可用 --enrich 让大模型估算，或 --enrich-detail 走商品详情接口（仅自己店铺）",
+    "repurchase": "接口未提供，缺省 50；可用 --enrich 让大模型估算",
+    "compliance_risk": "接口未提供，缺省 20；可用 --enrich 让大模型估算",
 }
 
 
@@ -468,6 +476,79 @@ class DouyinClient:
             "products": list(products),
         }
 
+    def get_product_detail(
+        self,
+        product_id: str | int | None = None,
+        out_product_id: str | None = None,
+        show_draft: bool = False,
+    ) -> dict[str, Any]:
+        """查询商品详情（官方 ``product.detail``）。
+
+        文档：https://op.jinritemai.com/docs/api-docs/14/56
+
+        .. warning::
+           `product_id` 官方描述为「抖店系统生成，**店铺下唯一**」。该接口只能查
+           **已授权店铺自己的商品**，查不到精选联盟里其他商家的商品。
+           精选联盟商品的重量请用 ``app.enrich`` 的大模型估算。
+        """
+        if not product_id and not out_product_id:
+            raise ValueError("必须提供 product_id 或 out_product_id")
+        params: dict[str, Any] = {
+            "product_id": str(product_id) if product_id else None,
+            "out_product_id": out_product_id or None,
+            # 官方：不传默认为 false（读取线上数据）
+            "show_draft": "true" if show_draft else None,
+        }
+        return self.call(M_PRODUCT_DETAIL, params)
+
+
+def parse_weight_kg(detail: Mapping[str, Any]) -> Optional[float]:
+    """从 ``product.detail`` 响应中解析商品重量（单位 kg）。
+
+    优先级（字段定义来自官方文档 api-docs/14/56）：
+
+    1. 商品级 ``weight_value`` + ``weight_unit``（0=kg，1=g）
+    2. SKU 级 ``spec_prices[].delivery_infos[]`` 中 ``info_type == "weight"``，
+       取**最大**值 —— 发货按最重的规格估算更安全
+    3. ``logistics_info.net_weight_qty`` 仅跨境商品返回且文档未标明单位，**不采用**
+
+    Returns:
+        重量（kg）；解析不出时返回 ``None``（调用方应保持缺省值而不是写 0）。
+    """
+    try:
+        raw_value = float(detail.get("weight_value") or 0)
+    except (TypeError, ValueError):
+        raw_value = 0.0
+
+    if raw_value > 0:
+        try:
+            factor = WEIGHT_UNIT_TO_KG.get(int(detail.get("weight_unit")), 1.0)
+        except (TypeError, ValueError):
+            factor = 1.0  # 单位缺失时按 kg 处理
+        kg = raw_value * factor
+        if kg > 0:
+            return round(kg, 4)
+
+    heaviest: Optional[float] = None
+    for spec in detail.get("spec_prices") or []:
+        if not isinstance(spec, Mapping):
+            continue
+        for info in spec.get("delivery_infos") or []:
+            if not isinstance(info, Mapping):
+                continue
+            if str(info.get("info_type") or "").strip().lower() != "weight":
+                continue
+            factor = DETAIL_UNIT_TO_KG.get(str(info.get("info_unit") or "").strip().lower())
+            if factor is None:
+                continue
+            try:
+                kg = float(info.get("info_value")) * factor
+            except (TypeError, ValueError):
+                continue
+            if kg > 0 and (heaviest is None or kg > heaviest):
+                heaviest = kg
+    return round(heaviest, 4) if heaviest else None
+
 
 # --------------------------------------------------------------------------- #
 # 响应映射
@@ -562,6 +643,7 @@ def to_product(raw: Mapping[str, Any], *, competition_total: int = 0,
 
     return ProductIn(
         title=str(raw.get("title") or "").strip() or f"抖音商品{product_id}",
+        external_id=product_id,
         category=_category_label(raw),
         price=price,
         cost=cost,

@@ -180,13 +180,13 @@ curl -X POST http://127.0.0.1:8000/import -H "Content-Type: application/json" -d
 | 竞争度 | ✅ 接口 | 同条件下 `total`（在售商品数）取对数映射 |
 | 毛利率 | ✅ 接口 | `kol_cos_fee` / `kol_cos_ratio`（达人佣金）换算 |
 | 内容传播力 | ⚠️ 代理 | 用 `kol_cos_ratio` 代理（佣金越高越易撬动达人内容） |
-| 重量 | ❌ 缺省 0.5 | 接口未返回，需人工复核 |
-| 复购潜力 | ❌ 缺省 50 | 接口未返回，需人工复核 |
-| 合规风险 | ❌ 缺省 20 | 接口未返回，需人工复核 |
+| 重量 | ⚠️ 缺省 0.5 | 接口未返回。可 `--enrich` 估算，或 `--enrich-detail` 走商品详情接口（仅自己店铺商品） |
+| 复购潜力 | ⚠️ 缺省 50 | 接口未返回。可 `--enrich` 估算 |
+| 合规风险 | ⚠️ 缺省 20 | 接口未返回。可 `--enrich` 估算 |
 
-**因此抖音来源的商品有 3 个维度是常数**，总分主要由销量与佣金率驱动。这是当前实现的
-已知局限：`note` 字段会写明「需人工复核」，`app.sources.douyin.FIELD_PROVENANCE`
-也把每个维度的来源写进了代码，可用 `scripts/douyin_fetch.py --check` 打印出来。
+**不补齐时这 3 个维度是常数**，总分主要由销量与佣金率驱动。补齐方式见下一节：
+`note` 字段与 `app.sources.douyin.FIELD_PROVENANCE` 会写明每个维度的真实来源，
+`scripts/douyin_fetch.py --check` 也能打印出来。
 
 三条与官方口径相关的换算约定（代码已处理）：
 
@@ -194,6 +194,51 @@ curl -X POST http://127.0.0.1:8000/import -H "Content-Type: application/json" -d
 - `kol_cos_ratio` 是**百分数乘 100**（`10.00` 表示 10%），已除以 100
 - `cost` 被反推为「售价 − 达人佣金」，因此算出的毛利率**等于达人佣金率** —— 这是
   **分销带货视角**。自营商家请自行覆盖 `cost`
+
+### 补齐重量 / 复购 / 合规
+
+选品接口不返回这三个字段，提供两种补齐方式：
+
+```bash
+# 1) 大模型估算（任意商品可用）—— 按标题 + 类目推断
+python scripts/douyin_fetch.py --keywords "咖啡" --enrich --score
+
+# 2) 商品详情接口（仅「自己店铺」的商品有效）
+python scripts/douyin_fetch.py --keywords "咖啡" --enrich-detail 20 --score
+
+# 两者可叠加：先用详情接口拿真实重量，剩余字段由大模型补
+python scripts/douyin_fetch.py --keywords "咖啡" --enrich --enrich-detail 20 --score
+```
+
+Streamlit 的 **🎯 抖音拉取** 页签也有对应开关（「补齐重量/复购/合规」+「额外用商品详情接口补重量」）。
+
+#### 关于 `--enrich-detail` 的重要限制
+
+官方对 `product.detail` 的入参 `product_id` 说明是「抖店系统生成，**店铺下唯一**」
+（文档 <https://op.jinritemai.com/docs/api-docs/14/56>）——它只能查**已授权店铺自己的商品**。
+精选联盟里其他商家的商品调用会返回 `isv.parameter-invalid:2010058 商品不存在`。
+
+因此对「从精选联盟选品」这个主场景，**重量拿不到真实值**，只能靠大模型估算。
+这类失败会被逐条记录并计入报告，不会中断流程。
+
+重量解析覆盖官方定义的全部字段：
+
+| 来源 | 字段 | 单位 |
+| --- | --- | --- |
+| 商品级 | `weight_value` + `weight_unit` | `0`=kg，`1`=g |
+| SKU 级 | `spec_prices[].delivery_infos[]` | `mg` / `g` / `kg`，多规格取**最大值** |
+| 跨境 | `logistics_info.net_weight_qty` | 文档未标单位，**不采用** |
+
+#### 估算值不会被伪装成接口数据
+
+- `note` 尾部的数据来源说明会写成「重量=大模型估算、复购=大模型估算、合规=大模型估算」
+- 商品详情接口拿到的重量则标注为「重量=商品详情接口」
+- 未补齐时保持「缺省值」措辞
+- 估算结果按 `标题 + 类目` 缓存到 `data/cache/llm_estimates.json`，重复拉取不再消耗 token
+  （`--refresh-estimates` 可强制重算）
+
+估算提示词里给了明确的量级参考（手机壳 0.05kg、保温杯 0.35kg、折叠椅 3.2kg 等），
+并把数值限制在合理区间（重量 0.01–50kg，复购 / 合规 0–100）。
 
 ### 签名实现
 
@@ -319,6 +364,7 @@ ai-product-selection/
 │   ├── models.py      # Pydantic 数据模型
 │   ├── scoring.py     # 规则打分引擎（纯函数，可单测）
 │   ├── service.py     # 业务编排
+│   ├── enrich.py      # 补齐接口缺失的维度（详情接口 / 大模型估算）
 │   └── sources/
 │       └── douyin.py  # 抖音精选联盟官方 API 客户端 + 字段映射
 ├── data/
@@ -328,6 +374,7 @@ ai-product-selection/
 │   └── seed_data.py
 ├── tests/
 │   ├── test_douyin.py
+│   ├── test_enrich.py
 │   └── test_scoring.py
 ├── streamlit_app.py
 ├── conftest.py
@@ -344,9 +391,9 @@ pytest -q
 ## 后续规划
 
 - [x] 采集器：抖音精选联盟（官方 API，`buyin.kolMaterialsProductsSearch`）
+- [x] 补齐抖音商品的重量 / 复购 / 合规维度（`--enrich` 大模型估算 + `--enrich-detail` 商品详情接口）
 - [ ] 采集器：1688 / 亚马逊榜单
-- [ ] 补齐抖音商品的重量 / 复购 / 合规维度（接入商品详情 API 或人工补录）
-- [ ] 用 LLM 自动估算 `heat`、`virality` 等主观维度，替代手工填写
+- [ ] 用 LLM 自动估算 `heat`、`virality`，彻底摆脱手工填主观维度
 - [ ] 权重在线调参与 A/B 对比
 - [ ] 选品结果导出为采购单 / 上架任务
 
