@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pandas as pd
 import streamlit as st
 
@@ -20,6 +22,7 @@ from app.sources.douyin import (
     DouyinConfigError,
     DouyinSource,
 )
+from app.weights import DIMENSIONS, PRESETS, describe, normalize, preset_weights
 
 st.set_page_config(page_title="AI 选品库", page_icon="🛒", layout="wide")
 
@@ -440,10 +443,330 @@ def page_stats() -> None:
         }), width="stretch", hide_index=True)
 
     st.divider()
+    st.markdown("**当前全局权重**")
+    st.dataframe(
+        pd.DataFrame([
+            {"维度": DIMENSION_LABELS.get(name, name),
+             "权重": f"{normalize(settings.weights)[name]:.1%}"}
+            for name in DIMENSIONS
+        ]),
+        width="stretch", hide_index=True,
+    )
+
+    st.divider()
     st.caption(
         f"AI 选品库 v{__version__} ｜ 数据库：`{settings.db_path}` ｜ "
         f"LLM：{'已启用 ' + settings.llm_model if llm.is_available() else '未启用（纯规则打分）'}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# 权重调参与 A/B 对比
+# --------------------------------------------------------------------------- #
+
+def _load_profiles() -> list[dict]:
+    return db.list_profiles()
+
+
+def flash(kind: str, message: str) -> None:
+    """记录一条提示，留到 rerun 之后展示。
+
+    直接调 ``st.success()`` 再 ``st.rerun()`` 会把消息丢掉 —— 重跑会清空当前渲染。
+    """
+    st.session_state.setdefault("_flashes", []).append((kind, message))
+
+
+def render_flashes() -> None:
+    """展示并清空上一轮留下的提示。"""
+    for kind, message in st.session_state.pop("_flashes", []):
+        getattr(st, kind)(message)
+
+
+def tuning_weights() -> None:
+    """① 权重方案：调滑块、存方案。"""
+    preset_options = ["（不载入）", *PRESETS]
+    chosen = st.selectbox(
+        "从内置预设载入", preset_options,
+        format_func=lambda key: "（不载入）" if key == "（不载入）"
+        else f"{PRESETS[key]['label']} —— {PRESETS[key]['description']}",
+    )
+    if chosen != "（不载入）" and st.button(f"应用预设「{PRESETS[chosen]['label']}」"):
+        st.session_state["tuning_weights"] = preset_weights(chosen)
+        st.rerun()
+
+    current = st.session_state.get("tuning_weights") or settings.weights
+    st.markdown("**调整权重**（保存时会自动归一化到 100%）")
+
+    raw: dict[str, float] = {}
+    columns = st.columns(4)
+    for index, name in enumerate(DIMENSIONS):
+        with columns[index % 4]:
+            raw[name] = st.slider(
+                DIMENSION_LABELS.get(name, name), 0.0, 1.0,
+                float(current.get(name, 0.0)), 0.01, key=f"tune_{name}",
+            )
+
+    normalized = normalize(raw)
+    st.caption(f"归一化后重心：{describe(normalized)}")
+    st.dataframe(
+        pd.DataFrame([
+            {"维度": DIMENSION_LABELS.get(name, name),
+             "权重": f"{normalized[name]:.1%}",
+             "数值": round(normalized[name], 4)}
+            for name in DIMENSIONS
+        ]),
+        width="stretch", hide_index=True,
+    )
+
+    with st.form("save_profile_form"):
+        col1, col2 = st.columns([1, 2])
+        name = col1.text_input("方案名", placeholder="例如：毛利优先-自用")
+        description = col2.text_input("描述", placeholder="为什么这么调")
+        if st.form_submit_button("保存为方案", type="primary"):
+            try:
+                profile = service.save_profile(name, raw, description)
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                flash("success", f"已保存 #{profile['id']}「{profile['name']}」："
+                      f"{describe(profile['weights'])}")
+                st.rerun()
+
+    st.divider()
+    col_a, col_b = st.columns([3, 1])
+    with col_a:
+        st.markdown("**已保存的方案**")
+    with col_b:
+        if st.button("写入内置预设"):
+            flash("success", f"已写入 {service.install_presets()} 个预设")
+            st.rerun()
+
+    profiles = _load_profiles()
+    if not profiles:
+        st.info("还没有保存任何方案。")
+        return
+    st.dataframe(
+        pd.DataFrame([
+            {"ID": p["id"], "名称": p["name"],
+             "重心": describe(p["weights"]), "描述": p["description"]}
+            for p in profiles
+        ]),
+        width="stretch", hide_index=True,
+    )
+    to_delete = st.selectbox("删除方案", ["（不删除）", *[p["name"] for p in profiles]])
+    if to_delete != "（不删除）" and st.button(f"确认删除「{to_delete}」"):
+        db.delete_profile(to_delete)
+        flash("success", f"已删除方案「{to_delete}」")
+        st.rerun()
+
+
+def tuning_snapshots() -> None:
+    """② 打分快照：把一次打分固化成可对比的基线。"""
+    st.caption(
+        "快照会同时存下当时的**权重**与每个商品的**各维度得分**。"
+        "因此后续再导数据、再改权重，都不会影响历史快照 —— 这是做 A/B 的前提。"
+    )
+
+    profiles = _load_profiles()
+    source_options = ["当前滑块权重"] + [f"方案：{p['name']}" for p in profiles]
+    source = st.radio("权重来源", source_options, horizontal=True)
+
+    with st.form("create_run_form"):
+        col1, col2 = st.columns([1, 2])
+        label = col1.text_input("快照名称", value=f"运行 {datetime.now():%m-%d %H:%M}")
+        note = col2.text_input("备注", placeholder="例如：heat 来自接口 sales")
+        if st.form_submit_button("打分并固化快照", type="primary"):
+            profile = source.split("：", 1)[1] if source.startswith("方案：") else None
+            weights = None if profile else (st.session_state.get("tuning_weights")
+                                            or settings.weights)
+            try:
+                run = service.create_snapshot(label, weights=weights,
+                                              profile=profile, note=note)
+            except (ValueError, KeyError) as exc:
+                st.error(str(exc))
+            else:
+                flash("success", f"已创建快照 #{run['id']}「{run['label']}」："
+                      f"{run['product_count']} 个商品，平均分 {run['avg_score']}")
+                st.rerun()
+
+    st.divider()
+    st.markdown("**已有快照**")
+    runs = service.list_snapshots(limit=100)
+    if not runs:
+        st.info("还没有快照。")
+        return
+    st.dataframe(
+        pd.DataFrame([
+            {"ID": r["id"], "名称": r["label"], "商品数": r["product_count"],
+             "平均分": r["avg_score"], "重心": describe(r["weights"]),
+             "创建时间": r["created_at"].strftime("%m-%d %H:%M"), "备注": r["note"]}
+            for r in runs
+        ]),
+        width="stretch", hide_index=True,
+    )
+
+
+def _render_comparison(result) -> None:
+    col1, col2, col3 = st.columns(3)
+    col1.metric("秩相关 Spearman ρ", f"{result.spearman:.4f}")
+    col2.metric("平均排名变动", f"{result.avg_abs_rank_delta:.1f} 位")
+    col3.metric("最大排名变动", f"{result.max_rank_delta} 位")
+
+    st.info(f"{result.verdict}。（共同商品 {result.common} 个）")
+    if result.notes:
+        for note in result.notes:
+            st.caption(f"注：{note}")
+
+    if result.top_overlap:
+        st.markdown("**Top-N 榜单重合度**")
+        st.dataframe(
+            pd.DataFrame([
+                {"Top-N": f"Top{n}", "重合度": f"{value:.0%}", "数值": value}
+                for n, value in result.top_overlap.items()
+            ]),
+            width="stretch", hide_index=True,
+        )
+
+    changed = [m for m in result.movers if m.rank_delta != 0]
+    st.markdown(f"**排名发生变动的商品（{len(changed)} 个）**")
+    if changed:
+        st.dataframe(
+            pd.DataFrame([
+                {"商品": m.title, "类目": m.category, "方向": m.direction,
+                 "位次变动": abs(m.rank_delta), "排名": f"#{m.rank_a} → #{m.rank_b}",
+                 "总分": f"{m.total_a} → {m.total_b}"}
+                for m in changed
+            ]),
+            width="stretch", hide_index=True,
+        )
+    else:
+        st.success("没有任何商品发生排名变动 —— 两套权重得出了完全相同的排序。")
+
+    with st.expander("权重差异明细"):
+        st.dataframe(
+            pd.DataFrame([
+                {"维度": row["label"], "A": f"{row['a']:.1%}",
+                 "B": f"{row['b']:.1%}", "变化": f"{row['delta']:+.1%}"}
+                for row in result.weight_diff
+            ]),
+            width="stretch", hide_index=True,
+        )
+
+
+def tuning_compare() -> None:
+    """③ A/B 对比。"""
+    runs = service.list_snapshots(limit=100)
+    if len(runs) < 2:
+        st.info("至少需要两个快照才能对比。到「② 打分快照」页签创建。")
+        return
+
+    labels = [f"#{r['id']} {r['label']}" for r in runs]
+    col1, col2, col3 = st.columns([2, 2, 1])
+    label_a = col1.selectbox("A（基线）", labels, index=1)
+    label_b = col2.selectbox("B（对照）", labels, index=0)
+    top_n = col3.multiselect("Top-N", [5, 10, 20, 50], default=[10])
+
+    if st.button("开始对比", type="primary"):
+        try:
+            st.session_state["comparison"] = service.compare_snapshots(
+                runs[labels.index(label_a)]["id"],
+                runs[labels.index(label_b)]["id"],
+                movers=50,
+            )
+            if top_n:
+                st.session_state["comparison"].top_overlap = {
+                    n: value for n, value in
+                    st.session_state["comparison"].top_overlap.items() if n in top_n
+                }
+        except KeyError as exc:
+            st.error(str(exc))
+
+    result = st.session_state.get("comparison")
+    if result is None:
+        st.caption("选好 A / B 后点「开始对比」。")
+        return
+
+    st.divider()
+    st.markdown(
+        f"**A** `#{result.run_a['id']} {result.run_a['label']}` "
+        f"平均分 {result.run_a['avg_score']}　vs　"
+        f"**B** `#{result.run_b['id']} {result.run_b['label']}` "
+        f"平均分 {result.run_b['avg_score']}"
+    )
+    _render_comparison(result)
+
+
+def tuning_sensitivity() -> None:
+    """④ 维度影响力：哪个维度在真正决定排序。"""
+    st.caption(
+        "把某个维度的权重归零后重算排名，与原排名求相关。"
+        "**ρ 越低说明该维度影响力越大**；若某维度归零后 ρ≈1，说明它几乎不参与决策，"
+        "那么它的取值质量（接口值 or 大模型估算）也就无关紧要。"
+    )
+    runs = service.list_snapshots(limit=100)
+    if not runs:
+        st.info("还没有快照。到「② 打分快照」页签创建一个。")
+        return
+
+    col1, col2 = st.columns([3, 1])
+    labels = [f"#{r['id']} {r['label']}" for r in runs]
+    chosen = col1.selectbox("快照", labels)
+    top_n = col2.number_input("Top-N", 1, 100, 10, step=5)
+
+    run = runs[labels.index(chosen)]
+    impacts = service.snapshot_sensitivity(run["id"], top_n=int(top_n))
+    if not impacts:
+        st.warning(
+            "该快照只有一个非零维度，把它归零后所有商品分数相同、排名无意义，"
+            "因此没有可计算的影响力数据。请先用包含多个维度的权重创建快照。"
+        )
+        return
+
+    st.dataframe(
+        pd.DataFrame([
+            {"维度": impact.label, "权重": f"{impact.weight:.1%}",
+             "ρ": impact.spearman, "影响力": impact.influence,
+             "最大变动": impact.max_rank_delta,
+             f"Top{int(top_n)} 重合": f"{impact.top_overlap:.0%}",
+             "结论": impact.verdict}
+            for impact in impacts
+        ]),
+        width="stretch", hide_index=True,
+        column_config={
+            "ρ": st.column_config.NumberColumn("ρ", format="%.4f"),
+            "影响力": st.column_config.ProgressColumn(
+                "影响力", min_value=0.0, max_value=1.0, format="%.4f"
+            ),
+        },
+    )
+
+    strongest = impacts[0]
+    st.markdown(f"**影响力最大：{strongest.label}**（ρ={strongest.spearman:.4f}）—— {strongest.verdict}")
+    weak = [impact for impact in impacts if impact.spearman >= 0.99]
+    if weak:
+        names = "、".join(impact.label for impact in weak)
+        st.warning(
+            f"几乎不影响排序：**{names}**。"
+            "这些维度的取值质量对结果影响极小，不必急着补齐或精修。"
+        )
+
+
+def page_tuning() -> None:
+    st.subheader("权重调参与 A/B 对比")
+    st.caption(
+        "权重决定结论。这里可以调权重、固化快照、对比两次运行的差异，"
+        "并看出**到底哪个维度在真正决定排序**。"
+    )
+    tabs = st.tabs(["① 权重方案", "② 打分快照", "③ A/B 对比", "④ 维度影响力"])
+    render_flashes()
+    with tabs[0]:
+        tuning_weights()
+    with tabs[1]:
+        tuning_snapshots()
+    with tabs[2]:
+        tuning_compare()
+    with tabs[3]:
+        tuning_sensitivity()
 
 
 def main() -> None:
@@ -451,7 +774,8 @@ def main() -> None:
     st.title("🛒 AI 选品库")
     st.caption("规则引擎 + 大模型的多维度选品打分与排序")
 
-    tabs = st.tabs(["📊 选品榜单", "📥 数据导入", "🎯 抖音拉取", "➕ 商品录入", "📈 数据概览"])
+    tabs = st.tabs(["📊 选品榜单", "📥 数据导入", "🎯 抖音拉取", "⚖️ 权重调参",
+                    "➕ 商品录入", "📈 数据概览"])
     with tabs[0]:
         page_leaderboard()
     with tabs[1]:
@@ -459,8 +783,10 @@ def main() -> None:
     with tabs[2]:
         page_douyin()
     with tabs[3]:
-        page_create()
+        page_tuning()
     with tabs[4]:
+        page_create()
+    with tabs[5]:
         page_stats()
 
 

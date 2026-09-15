@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Query
@@ -17,6 +18,7 @@ from . import __version__, crawler, db, llm, service
 from .config import settings
 from .models import Product, ProductIn
 from .sources.douyin import ERROR_CODES, DouyinClient, DouyinError
+from .weights import PRESETS
 
 app = FastAPI(
     title="AI 选品库",
@@ -137,6 +139,172 @@ def leaderboard(
 @app.get("/stats", summary="看板统计")
 def stats() -> dict[str, Any]:
     return service.dashboard_stats()
+
+
+# --------------------------------------------------------------------------- #
+# 权重方案与打分快照（调参 / A/B 对比）
+# --------------------------------------------------------------------------- #
+
+class ProfileRequest(BaseModel):
+    """保存权重方案。"""
+
+    name: str = Field(..., min_length=1, max_length=64)
+    weights: dict[str, float] = Field(..., description="维度名 → 权重，会自动归一化")
+    description: str = Field("", max_length=200)
+
+
+class RunRequest(BaseModel):
+    """按指定权重打一次分并固化成快照。"""
+
+    label: str = Field(..., min_length=1, max_length=100, description="快照名称")
+    weights: Optional[dict[str, float]] = Field(
+        None, description="直接指定权重；与 profile 二选一"
+    )
+    profile: Optional[str] = Field(
+        None, description="权重方案名或内置预设名（balanced / margin_first / ...）"
+    )
+    note: str = Field("", max_length=200, description="备注，例如「接口热度」")
+
+
+def _run_brief(run: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": run["id"],
+        "label": run["label"],
+        "profile_id": run.get("profile_id"),
+        "weights": run["weights"],
+        "note": run.get("note", ""),
+        "product_count": run["product_count"],
+        "avg_score": run["avg_score"],
+        "created_at": run.get("created_at"),
+    }
+
+
+def _comparison_payload(result: Any) -> dict[str, Any]:
+    return {
+        "run_a": _run_brief(result.run_a),
+        "run_b": _run_brief(result.run_b),
+        "common": result.common,
+        "only_a": result.only_a,
+        "only_b": result.only_b,
+        "spearman": result.spearman,
+        "verdict": result.verdict,
+        "summary": result.summary(),
+        "avg_abs_rank_delta": result.avg_abs_rank_delta,
+        "max_rank_delta": result.max_rank_delta,
+        "top_overlap": result.top_overlap,
+        "weight_diff": result.weight_diff,
+        "notes": result.notes,
+        "movers": [
+            {**asdict(mover), "rank_delta": mover.rank_delta,
+             "score_delta": mover.score_delta, "direction": mover.direction}
+            for mover in result.movers
+        ],
+    }
+
+
+@app.get("/presets", summary="内置权重预设")
+def list_presets() -> list[dict[str, Any]]:
+    return [
+        {"name": name, "label": spec["label"],
+         "description": spec["description"], "weights": spec["weights"]}
+        for name, spec in PRESETS.items()
+    ]
+
+
+@app.get("/profiles", summary="权重方案列表")
+def list_profiles() -> list[dict[str, Any]]:
+    return db.list_profiles()
+
+
+@app.post("/profiles", status_code=201, summary="保存权重方案")
+def create_profile(payload: ProfileRequest) -> dict[str, Any]:
+    try:
+        return service.save_profile(payload.name, payload.weights, payload.description)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/profiles/install-presets", summary="把内置预设写入数据库")
+def install_presets() -> dict[str, Any]:
+    return {"installed": service.install_presets()}
+
+
+@app.delete("/profiles/{name}", summary="删除权重方案")
+def remove_profile(name: str) -> dict[str, Any]:
+    if not db.delete_profile(name):
+        raise HTTPException(status_code=404, detail=f"方案 {name!r} 不存在")
+    return {"deleted": name}
+
+
+@app.get("/runs", summary="打分快照列表")
+def list_runs(limit: int = Query(50, ge=1, le=500)) -> list[dict[str, Any]]:
+    return [_run_brief(run) for run in service.list_snapshots(limit=limit)]
+
+
+@app.post("/runs", status_code=201, summary="打分并固化快照")
+def create_run(payload: RunRequest) -> dict[str, Any]:
+    service.prepare_db()
+    try:
+        run = service.create_snapshot(
+            payload.label, weights=payload.weights,
+            profile=payload.profile, note=payload.note,
+        )
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _run_brief(run)
+
+
+@app.get("/runs/{run_id}", summary="快照详情（含排名）")
+def get_run(run_id: int) -> dict[str, Any]:
+    try:
+        run = service.snapshot_detail(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {**_run_brief(run), "items": run["items"]}
+
+
+@app.delete("/runs/{run_id}", summary="删除快照")
+def remove_run(run_id: int) -> dict[str, Any]:
+    if not db.delete_run(run_id):
+        raise HTTPException(status_code=404, detail=f"快照 {run_id} 不存在")
+    return {"deleted": run_id}
+
+
+@app.get("/runs/{run_id}/sensitivity", summary="该快照下各维度的影响力")
+def run_sensitivity(run_id: int, top_n: int = Query(10, ge=1, le=100)) -> dict[str, Any]:
+    try:
+        impacts = service.snapshot_sensitivity(run_id, top_n=top_n)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    note = ""
+    if not impacts:
+        note = (
+            "该快照只有一个非零维度，把它归零后所有商品分数相同、排名无意义，"
+            "因此没有可计算的影响力数据。请先用包含多个维度的权重创建快照。"
+        )
+    return {
+        "run_id": run_id,
+        "top_n": top_n,
+        "note": note,
+        "impacts": [
+            {**asdict(impact), "influence": impact.influence, "verdict": impact.verdict}
+            for impact in impacts
+        ],
+    }
+
+
+@app.get("/compare", summary="对比两个快照（A/B）")
+def compare(
+    run_a: int = Query(..., description="快照 A 的 id"),
+    run_b: int = Query(..., description="快照 B 的 id"),
+    movers: int = Query(10, ge=1, le=200, description="返回多少个变动最大的商品"),
+) -> dict[str, Any]:
+    try:
+        result = service.compare_snapshots(run_a, run_b, movers=movers)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _comparison_payload(result)
 
 
 # --------------------------------------------------------------------------- #

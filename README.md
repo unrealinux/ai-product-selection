@@ -292,6 +292,109 @@ python scripts/douyin_fetch.py --keywords "咖啡" --enrich-judge --override-hea
 
 ---
 
+## 权重调参与 A/B 对比
+
+权重决定结论。这套工具把「换权重会怎样」和「哪个维度在真正起作用」变成可测量的问题。
+
+### 核心机制：打分快照
+
+每次打分可以固化成**快照**，快照里存了当时的**权重**与每个商品的**各维度得分**。
+
+这带来一个重要能力：**后续再导数据、再改权重，都不影响历史快照**。
+所以能做真正的 A/B —— 比如对比「接口热度」与「大模型覆盖热度」：
+
+```bash
+# 基线：接口热度
+python scripts/douyin_fetch.py --keywords "咖啡" --enrich --score
+python scripts/tune_weights.py --run "基线-接口热度" --note "heat 来自接口 sales"
+
+# 对照：大模型覆盖热度（会覆写库里的商品数据）
+python scripts/douyin_fetch.py --keywords "咖啡" --enrich-judge --override-heat --score
+python scripts/tune_weights.py --run "对照-大模型热度" --note "heat 由大模型覆盖"
+
+# 对比 —— 基线快照没被覆写，所以依然可比较
+python scripts/tune_weights.py --compare 1 2
+```
+
+### 命令行
+
+```bash
+python scripts/tune_weights.py --presets                  # 看内置预设
+python scripts/tune_weights.py --install-presets          # 写入数据库
+python scripts/tune_weights.py --run "我的方案" --profile margin_first
+python scripts/tune_weights.py --run "自定义" --weights "margin=0.4,demand=0.1"
+python scripts/tune_weights.py --runs                     # 列出快照
+python scripts/tune_weights.py --compare 1 2             # A/B 对比
+python scripts/tune_weights.py --sensitivity 1            # 哪个维度在决定排序
+python scripts/tune_weights.py --save 我的方案 --weights "毛利率=0.4,需求热度=0.2"
+```
+
+权重可用英文维度名或中文标签（需完整名，如「毛利率」），会自动归一化到 100%。
+
+### 内置预设
+
+| 预设 | 重心 | 适用 |
+| --- | --- | --- |
+| `balanced` | 毛利 24% > 需求 22% > 竞争 18% | 通用筛选 |
+| `margin_first` | 毛利 40% > 需求 18% > 竞争 14% | 预算紧、要确定性回报 |
+| `traffic_first` | 需求 32% > 传播 24% > 竞争 16% | 冲量、做爆款测款 |
+| `low_risk` | 合规 28% > 毛利 24% > 竞争 16% | 新店、怕踩雷 |
+
+### 怎么读对比结果
+
+```
+共同商品 12 个；Spearman ρ = 0.7811（两次排序有可观察的差异）；
+平均排名变动 1.7 位，最大 6 位；Top5 80%、Top10 80%、Top20 100%
+
+可重复使用硅胶保鲜袋 4 件装  下降 6 位  #3 → #9
+便携式迷你折叠洗衣机       上升 4 位  #7 → #3
+```
+
+| ρ | 含义 |
+| --- | --- |
+| ≥ 0.98 | 排序几乎完全一致 —— 换权重的收益有限 |
+| 0.90 ~ 0.98 | 高度一致，个别商品有出入 |
+| 0.75 ~ 0.90 | 有明显差异，建议按业务目标选权重 |
+| < 0.75 | 基本是两套结论，必须用业务结果校准 |
+
+### 维度影响力（哪个维度在真正起作用）
+
+`sensitivity` 把某个维度的权重归零后重算排名，与原排名求相关：
+
+| ρ | 含义 |
+| --- | --- |
+| ≈ 1.00 | 去掉它排序不变 → **该维度几乎不参与决策** |
+| 0.95 ~ 0.99 | 影响很小 |
+| 0.85 ~ 0.95 | 中等影响 |
+| < 0.85 | 对排序起决定作用 |
+
+这个视角能暴露**看起来重要、实际无效**的维度。自带 12 条示例数据上的实测：
+
+```
+毛利率    权重 24%  ρ=1.0000  影响力 0.0000  最大变动 0 位  几乎不影响排序
+传播潜力  权重 12%  ρ=0.9930  影响力 0.0070  最大变动 1 位  几乎不影响排序
+需求热度  权重 22%  ρ=0.9650  影响力 0.0350  最大变动 2 位  影响很小
+竞争度    权重 18%  ρ=0.7972  影响力 0.2028  最大变动 4 位  对排序起决定作用
+```
+
+两个值得注意的结论：
+
+1. **毛利率权重最高（24%）却几乎不影响排序** —— 因为 `MARGIN_BEST = 0.60`，
+   示例数据里大多数商品毛利率都超过 60%，该维度已经**饱和**（都是 100 分），自然没有区分度。
+   这类问题只有调参才会暴露。
+2. **需求热度的 ρ = 0.9650** 直接回答了「用大模型覆盖热度值不值」：
+   在当前数据下热度对排序影响很小，所以换不换对榜单影响有限。
+
+> 这两个数字都是**数据相关的**。换一批商品结论可能完全不同，请在自己的数据上跑一遍。
+> 如果某维度 ρ ≈ 1，说明**不必急着为它补齐数据或精修取值**。
+
+### Streamlit 看板
+
+**⚖️ 权重调参** 页签有四个子页：权重方案（滑块 + 预设 + 保存）、
+打分快照、A/B 对比、维度影响力，均有进度条与变动明细表格。
+
+---
+
 ## API 一览
 
 | 方法 | 路径 | 说明 |
@@ -305,6 +408,17 @@ python scripts/douyin_fetch.py --keywords "咖啡" --enrich-judge --override-hea
 | `POST` | `/score` | 全库打分 |
 | `GET` | `/leaderboard` | 选品榜单（按总分倒序） |
 | `GET` | `/stats` | 看板统计 |
+| `GET` | `/presets` | 内置权重预设 |
+| `GET` | `/profiles` | 权重方案列表 |
+| `POST` | `/profiles` | 保存权重方案 |
+| `DELETE` | `/profiles/{name}` | 删除权重方案 |
+| `POST` | `/profiles/install-presets` | 把内置预设写入数据库 |
+| `GET` | `/runs` | 打分快照列表 |
+| `POST` | `/runs` | 按指定权重打分并固化快照 |
+| `GET` | `/runs/{id}` | 快照详情（含排名） |
+| `DELETE` | `/runs/{id}` | 删除快照 |
+| `GET` | `/runs/{id}/sensitivity` | 各维度对排序的影响力 |
+| `GET` | `/compare` | 对比两个快照（A/B） |
 | `GET` | `/douyin/status` | 抖音数据源配置状态 + 官返回码释义 |
 | `POST` | `/douyin/token` | 换取 access_token（调试用，结果不落盘） |
 
@@ -398,6 +512,8 @@ ai-product-selection/
 │   ├── llm.py         # OpenAI 兼容大模型接入 + 降级
 │   ├── models.py      # Pydantic 数据模型
 │   ├── scoring.py     # 规则打分引擎（纯函数，可单测）
+│   ├── weights.py     # 权重方案：预设 / 校验 / 归一化
+│   ├── compare.py     # 快照对比与维度影响力（Spearman / Top-N 重合）
 │   ├── service.py     # 业务编排
 │   ├── enrich.py      # 补齐接口缺失的维度（详情接口 / 大模型估算）
 │   └── sources/
@@ -406,10 +522,12 @@ ai-product-selection/
 │   └── sample_products.json
 ├── scripts/
 │   ├── douyin_fetch.py
+│   ├── tune_weights.py
 │   └── seed_data.py
 ├── tests/
 │   ├── test_douyin.py
 │   ├── test_enrich.py
+│   ├── test_compare.py
 │   └── test_scoring.py
 ├── streamlit_app.py
 ├── conftest.py
@@ -429,7 +547,8 @@ pytest -q
 - [x] 补齐抖音商品的重量 / 复购 / 合规维度（`--enrich` 大模型估算 + `--enrich-detail` 商品详情接口）
 - [ ] 采集器：1688 / 亚马逊榜单
 - [x] 让 LLM 判断 `heat` / `virality` / 类目名（`--enrich-judge`，按字段区分覆盖策略）
-- [ ] 权重在线调参与 A/B 对比
+- [x] 权重在线调参与 A/B 对比（快照 + Spearman + 维度影响力）
+- [ ] 用真实转化率回测权重（目前只能比排序差异，还不能回答「哪套权重更赚钱」）
 - [ ] 选品结果导出为采购单 / 上架任务
 
 ## License

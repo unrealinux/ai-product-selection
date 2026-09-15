@@ -7,7 +7,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator, Mapping, Optional
 
 from .config import settings
 from .models import Product, ProductIn
@@ -48,6 +48,43 @@ CREATE TABLE IF NOT EXISTS scores (
 
 CREATE INDEX IF NOT EXISTS idx_scores_product ON scores(product_id);
 CREATE INDEX IF NOT EXISTS idx_scores_total   ON scores(total DESC);
+
+-- 权重方案
+CREATE TABLE IF NOT EXISTS weight_profiles (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT    NOT NULL UNIQUE,
+    weights     TEXT    NOT NULL,
+    description TEXT    NOT NULL DEFAULT '',
+    created_at  TEXT    NOT NULL,
+    updated_at  TEXT    NOT NULL
+);
+
+-- 一次打分运行的快照（权重与商品时刻都固定下来，事后可复现、可对比）
+CREATE TABLE IF NOT EXISTS score_runs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    label         TEXT    NOT NULL,
+    profile_id    INTEGER REFERENCES weight_profiles(id) ON DELETE SET NULL,
+    weights       TEXT    NOT NULL,
+    note          TEXT    NOT NULL DEFAULT '',
+    product_count INTEGER NOT NULL DEFAULT 0,
+    avg_score     REAL    NOT NULL DEFAULT 0,
+    created_at    TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS score_run_items (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id     INTEGER NOT NULL REFERENCES score_runs(id) ON DELETE CASCADE,
+    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    title      TEXT    NOT NULL DEFAULT '',
+    category   TEXT    NOT NULL DEFAULT '',
+    source     TEXT    NOT NULL DEFAULT '',
+    total      REAL    NOT NULL,
+    rank_no    INTEGER NOT NULL,
+    dimensions TEXT    NOT NULL,
+    UNIQUE (run_id, product_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_items_run ON score_run_items(run_id);
 """
 
 PRODUCT_FIELDS = (
@@ -258,3 +295,148 @@ def stats(db_path: Path | str | None = None) -> dict[str, Any]:
         "grade_distribution": {row["grade"]: row["n"] for row in grade_rows},
         "top_categories": [dict(row) for row in category_rows],
     }
+
+
+# --------------------------------------------------------------------------- #
+# 权重方案
+# --------------------------------------------------------------------------- #
+
+def _profile_row(row: dict[str, Any]) -> dict[str, Any]:
+    row["weights"] = json.loads(row.get("weights") or "{}")
+    for key in ("created_at", "updated_at"):
+        if row.get(key):
+            row[key] = datetime.fromisoformat(row[key])
+    return row
+
+
+def upsert_profile(name: str, weights: Mapping[str, float], description: str = "",
+                   db_path: Path | str | None = None) -> dict[str, Any]:
+    """新增或更新权重方案（按 name 唯一）。"""
+    now = datetime.now().isoformat(timespec="seconds")
+    payload = json.dumps(dict(weights), ensure_ascii=False, sort_keys=True)
+    with session(db_path) as conn:
+        conn.execute(
+            "INSERT INTO weight_profiles (name, weights, description, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT (name) DO UPDATE SET weights = excluded.weights, "
+            "description = excluded.description, updated_at = excluded.updated_at",
+            (name, payload, description, now, now),
+        )
+        row = conn.execute(
+            "SELECT * FROM weight_profiles WHERE name = ?", (name,)
+        ).fetchone()
+    return _profile_row(dict(row))
+
+
+def list_profiles(db_path: Path | str | None = None) -> list[dict[str, Any]]:
+    with session(db_path) as conn:
+        rows = conn.execute("SELECT * FROM weight_profiles ORDER BY id").fetchall()
+    return [_profile_row(dict(row)) for row in rows]
+
+
+def get_profile(name_or_id: str | int,
+                db_path: Path | str | None = None) -> Optional[dict[str, Any]]:
+    """按 id（int）或 name（str）取方案。"""
+    with session(db_path) as conn:
+        if isinstance(name_or_id, int) or str(name_or_id).isdigit():
+            row = conn.execute(
+                "SELECT * FROM weight_profiles WHERE id = ?", (int(name_or_id),)
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM weight_profiles WHERE name = ?", (str(name_or_id),)
+            ).fetchone()
+    return _profile_row(dict(row)) if row else None
+
+
+def delete_profile(name_or_id: str | int, db_path: Path | str | None = None) -> bool:
+    profile = get_profile(name_or_id, db_path)
+    if not profile:
+        return False
+    with session(db_path) as conn:
+        conn.execute("DELETE FROM weight_profiles WHERE id = ?", (profile["id"],))
+    return True
+
+
+# --------------------------------------------------------------------------- #
+# 打分运行快照
+# --------------------------------------------------------------------------- #
+
+def _run_row(row: dict[str, Any]) -> dict[str, Any]:
+    row["weights"] = json.loads(row.get("weights") or "{}")
+    if row.get("created_at"):
+        row["created_at"] = datetime.fromisoformat(row["created_at"])
+    return row
+
+
+def create_run(label: str, weights: Mapping[str, float], items: list[dict[str, Any]],
+               profile_id: Optional[int] = None, note: str = "",
+               db_path: Path | str | None = None) -> dict[str, Any]:
+    """把一次打分结果固化成快照。
+
+    Args:
+        items: 每项至少包含 ``product_id`` 与 ``total``；可选 ``title`` / ``category`` /
+            ``source`` / ``dimensions``。排名按 ``total`` 倒序自动生成。
+
+    快照同时存下当时的权重与各维度得分，因此后续商品数据或方案被修改都不影响历史对比。
+    """
+    ordered = sorted(items, key=lambda item: item["total"], reverse=True)
+    average = round(sum(item["total"] for item in ordered) / len(ordered), 2) if ordered else 0.0
+    now = datetime.now().isoformat(timespec="seconds")
+
+    with session(db_path) as conn:
+        cursor = conn.execute(
+            "INSERT INTO score_runs (label, profile_id, weights, note, product_count, "
+            "avg_score, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (label, profile_id,
+             json.dumps(dict(weights), ensure_ascii=False, sort_keys=True),
+             note, len(ordered), average, now),
+        )
+        run_id = cursor.lastrowid
+        conn.executemany(
+            "INSERT INTO score_run_items (run_id, product_id, title, category, source, "
+            "total, rank_no, dimensions) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (run_id, item["product_id"], item.get("title", ""),
+                 item.get("category", ""), item.get("source", ""),
+                 float(item["total"]), index,
+                 json.dumps(item.get("dimensions") or {}, ensure_ascii=False))
+                for index, item in enumerate(ordered, start=1)
+            ],
+        )
+        row = conn.execute("SELECT * FROM score_runs WHERE id = ?", (run_id,)).fetchone()
+    return _run_row(dict(row))
+
+
+def list_runs(limit: int = 50, db_path: Path | str | None = None) -> list[dict[str, Any]]:
+    with session(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM score_runs ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [_run_row(dict(row)) for row in rows]
+
+
+def get_run(run_id: int, db_path: Path | str | None = None) -> Optional[dict[str, Any]]:
+    with session(db_path) as conn:
+        row = conn.execute("SELECT * FROM score_runs WHERE id = ?", (run_id,)).fetchone()
+    return _run_row(dict(row)) if row else None
+
+
+def get_run_items(run_id: int, db_path: Path | str | None = None) -> list[dict[str, Any]]:
+    """取快照内的条目，按排名升序。"""
+    with session(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM score_run_items WHERE run_id = ? ORDER BY rank_no", (run_id,)
+        ).fetchall()
+    items = []
+    for row in rows:
+        item = dict(row)
+        item["dimensions"] = json.loads(item.get("dimensions") or "{}")
+        items.append(item)
+    return items
+
+
+def delete_run(run_id: int, db_path: Path | str | None = None) -> bool:
+    with session(db_path) as conn:
+        cursor = conn.execute("DELETE FROM score_runs WHERE id = ?", (run_id,))
+    return cursor.rowcount > 0
