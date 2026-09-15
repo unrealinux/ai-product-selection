@@ -653,6 +653,139 @@ def page_taobao() -> None:
     )
 
 
+def page_costlink() -> None:
+    st.subheader("成本对齐")
+    st.caption(
+        "把供货价（1688 / 表格导入）配到零售商品（淘宝）上，算出**真实毛利率**。"
+        "淘宝 A2A 只给零售价、没有成本，导入后毛利率全是 100% —— 权重最高的维度因此失效。"
+    )
+
+    from app.costlink import (
+        DEFAULT_THRESHOLD,
+        apply_matches,
+        link_costs,
+        margin_report,
+        title_similarity,
+    )
+
+    products = db.list_products(limit=5000)
+    if not products:
+        st.info("库里还没有商品。先到「表格导入」导 1688 表，再到「淘宝拉取」拿零售价。")
+        return
+
+    health = margin_report(products)
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("商品总数", len(products))
+    col2.metric("有成本", health["count"])
+    col3.metric("缺成本", health["missing_cost"])
+    col4.metric("毛利率≥95%", health["saturated"],
+                help="基本等于没成本，是数据质量问题。")
+    if health["count"]:
+        st.caption(f"现有成本对应的毛利率：中位数 {health['median']:.1%}，"
+                   f"区间 {health['min']:.1%} ~ {health['max']:.1%}")
+
+    if health["missing_cost"] == 0:
+        st.success("所有商品都有成本了，毛利率维度是真实数据。")
+        return
+
+    sources = sorted({p.source for p in products})
+    with st.expander("匹配参数", expanded=True):
+        col_a, col_b = st.columns(2)
+        target_source = col_a.selectbox("待补成本的来源", ["（全部缺成本的）", *sources])
+        supply_source = col_b.selectbox("提供成本的来源", ["（全部有成本的）", *sources])
+        col_c, col_d = st.columns(2)
+        threshold = col_c.slider(
+            "相似度阈值", 0.20, 0.90, DEFAULT_THRESHOLD, 0.01,
+            help="跨平台只能靠标题匹配。阈值越低匹得越多但越可能错。",
+        )
+        min_specs = col_d.number_input(
+            "至少共享几个规格 token", 0, 5, 0, step=1,
+            help='如要求同时出现 "304" 与 "500ml" 才算匹配，就填 2。',
+        )
+        st.caption(
+            "⚠️ 标题匹配是**启发式**，不是精确配对。高分不等于同一款货。"
+            "所以下面先预览、确认后再写入，低置信候选默认不应用。"
+        )
+
+    if st.button("预览匹配结果", type="primary"):
+        with st.spinner("正在匹配…"):
+            st.session_state["costlink_result"] = link_costs(
+                products,
+                target_source="" if target_source.startswith("（") else target_source,
+                supply_source="" if supply_source.startswith("（") else supply_source,
+                threshold=float(threshold),
+                min_shared_specs=int(min_specs),
+                dry_run=True,
+            )
+
+    result = st.session_state.get("costlink_result")
+    if result is None:
+        st.caption("设好参数后点「预览匹配结果」。也可以先用 CLI 校准阈值："
+                   "`python scripts/link_costs.py --explain \"标题A|标题B\"`")
+        return
+
+    st.divider()
+    st.markdown(f"**{result.summary()}**")
+    for warning in result.warnings:
+        st.warning(warning)
+
+    if result.accepted:
+        st.markdown(f"**高置信匹配（{len(result.accepted)} 条）**")
+        st.dataframe(
+            pd.DataFrame([
+                {"相似度": m.score, "售价": m.target.price, "成本": m.cost,
+                 "毛利率": f"{m.margin:.1%}", "共同规格": "/".join(m.shared_specs),
+                 "淘宝商品": m.target.title, "← 供货来源": m.supply_title}
+                for m in sorted(result.accepted, key=lambda x: -x.score)
+            ]),
+            width="stretch", hide_index=True,
+            column_config={
+                "相似度": st.column_config.NumberColumn("相似度", format="%.3f"),
+                "毛利率": st.column_config.TextColumn("毛利率"),
+            },
+        )
+
+    if result.low_confidence:
+        with st.expander(f"低置信候选（{len(result.low_confidence)} 条，默认不应用）", expanded=False):
+            st.dataframe(
+                pd.DataFrame([
+                    {"相似度": m.score, "成本": m.cost,
+                     "淘宝商品": m.target.title, "← 可能的来源": m.supply_title}
+                    for m in sorted(result.low_confidence, key=lambda x: -x.score)
+                ]),
+                width="stretch", hide_index=True,
+            )
+
+    unmatched = [m for m in result.matches if m.supply is None]
+    if unmatched:
+        with st.expander(f"无匹配（{len(unmatched)} 条）", expanded=False):
+            st.caption("这些商品在供货池里找不到相似标题。可能是本期没采到同款，属于正常情况。")
+            st.dataframe(
+                pd.DataFrame([{"商品": m.target.title, "最高相似度": m.score}
+                              for m in unmatched]),
+                width="stretch", hide_index=True,
+            )
+
+    st.markdown("#### 写入")
+    st.caption("写入只改 `cost` 与 `note`（会记录成本来源与相似度），不改售价等其他字段。")
+    col_e, col_f = st.columns(2)
+    with col_e:
+        if st.button("写入高置信匹配", type="primary", disabled=not result.accepted):
+            written = apply_matches(result)
+            st.session_state["costlink_result"] = None
+            flash("success", f"已写入 {written} 条成本对齐结果。可到「选品榜单」重新打分查看。")
+            st.rerun()
+    with col_f:
+        if result.low_confidence and st.button(
+            f"连低置信一起写入（{len(result.low_confidence)} 条）",
+            help="有风险：低置信匹配很可能不是同一款货。",
+        ):
+            written = apply_matches(result, include_low_confidence=True)
+            st.session_state["costlink_result"] = None
+            flash("warning", f"已写入 {written} 条（含低置信），note 里已标注相似度，请人工复核。")
+            st.rerun()
+
+
 def page_create() -> None:
     st.subheader("商品录入")
     with st.form("create_product"):
@@ -1051,7 +1184,7 @@ def main() -> None:
     st.caption("规则引擎 + 大模型的多维度选品打分与排序")
 
     tabs = st.tabs(["📊 选品榜单", "📥 数据导入", "📄 表格导入", "🎯 抖音拉取", "🛒 淘宝拉取",
-                    "⚖️ 权重调参", "➕ 商品录入", "📈 数据概览"])
+                    "🔗 成本对齐", "⚖️ 权重调参", "➕ 商品录入", "📈 数据概览"])
     with tabs[0]:
         page_leaderboard()
     with tabs[1]:
@@ -1063,10 +1196,12 @@ def main() -> None:
     with tabs[4]:
         page_taobao()
     with tabs[5]:
-        page_tuning()
+        page_costlink()
     with tabs[6]:
-        page_create()
+        page_tuning()
     with tabs[7]:
+        page_create()
+    with tabs[8]:
         page_stats()
 
 
