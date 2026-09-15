@@ -85,6 +85,19 @@ CREATE TABLE IF NOT EXISTS score_run_items (
 );
 
 CREATE INDEX IF NOT EXISTS idx_run_items_run ON score_run_items(run_id);
+
+-- 表格导入的列映射方案（按源列名集合指纹复用）
+CREATE TABLE IF NOT EXISTS mapping_profiles (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    name           TEXT    NOT NULL UNIQUE,
+    fingerprint    TEXT    NOT NULL,
+    mapping        TEXT    NOT NULL,
+    sample_columns TEXT    NOT NULL DEFAULT '',
+    created_at     TEXT    NOT NULL,
+    updated_at     TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_mapping_fingerprint ON mapping_profiles(fingerprint);
 """
 
 PRODUCT_FIELDS = (
@@ -336,15 +349,18 @@ def list_profiles(db_path: Path | str | None = None) -> list[dict[str, Any]]:
 
 def get_profile(name_or_id: str | int,
                 db_path: Path | str | None = None) -> Optional[dict[str, Any]]:
-    """按 id（int）或 name（str）取方案。"""
+    """按名字或 id 取方案。
+
+    **先按名字查**：方案名很可能是纯数字（例如「1688」），
+    直接当 id 处理会查不到——这类静默失败很难排查。
+    """
     with session(db_path) as conn:
-        if isinstance(name_or_id, int) or str(name_or_id).isdigit():
+        row = conn.execute(
+            "SELECT * FROM weight_profiles WHERE name = ?", (str(name_or_id),)
+        ).fetchone()
+        if row is None and (isinstance(name_or_id, int) or str(name_or_id).isdigit()):
             row = conn.execute(
                 "SELECT * FROM weight_profiles WHERE id = ?", (int(name_or_id),)
-            ).fetchone()
-        else:
-            row = conn.execute(
-                "SELECT * FROM weight_profiles WHERE name = ?", (str(name_or_id),)
             ).fetchone()
     return _profile_row(dict(row)) if row else None
 
@@ -440,3 +456,80 @@ def delete_run(run_id: int, db_path: Path | str | None = None) -> bool:
     with session(db_path) as conn:
         cursor = conn.execute("DELETE FROM score_runs WHERE id = ?", (run_id,))
     return cursor.rowcount > 0
+
+
+# --------------------------------------------------------------------------- #
+# 表格导入的列映射方案
+# --------------------------------------------------------------------------- #
+
+def _mapping_row(row: dict[str, Any]) -> dict[str, Any]:
+    row["mapping"] = json.loads(row.get("mapping") or "{}")
+    row["columns"] = [c for c in (row.get("sample_columns") or "").split("\x1f") if c]
+    for key in ("created_at", "updated_at"):
+        if row.get(key):
+            row[key] = datetime.fromisoformat(row[key])
+    return row
+
+
+def upsert_mapping_profile(name: str, fingerprint: str, mapping: Mapping[str, Any],
+                           columns: Optional[list[str]] = None,
+                           db_path: Path | str | None = None) -> dict[str, Any]:
+    """保存列映射方案（按 name 唯一）。"""
+    now = datetime.now().isoformat(timespec="seconds")
+    payload = json.dumps(dict(mapping), ensure_ascii=False, sort_keys=True)
+    sample = "\x1f".join(columns or [])
+    with session(db_path) as conn:
+        conn.execute(
+            "INSERT INTO mapping_profiles (name, fingerprint, mapping, sample_columns, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (name) DO UPDATE SET fingerprint = excluded.fingerprint, "
+            "mapping = excluded.mapping, sample_columns = excluded.sample_columns, "
+            "updated_at = excluded.updated_at",
+            (name, fingerprint, payload, sample, now, now),
+        )
+        row = conn.execute(
+            "SELECT * FROM mapping_profiles WHERE name = ?", (name,)
+        ).fetchone()
+    return _mapping_row(dict(row))
+
+
+def list_mapping_profiles(db_path: Path | str | None = None) -> list[dict[str, Any]]:
+    with session(db_path) as conn:
+        rows = conn.execute("SELECT * FROM mapping_profiles ORDER BY id").fetchall()
+    return [_mapping_row(dict(row)) for row in rows]
+
+
+def get_mapping_profile(name_or_id: str | int,
+                        db_path: Path | str | None = None) -> Optional[dict[str, Any]]:
+    """按名字或 id 取映射方案。**先按名字查**（名字可能是「1688」这种纯数字）。"""
+    with session(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM mapping_profiles WHERE name = ?", (str(name_or_id),)
+        ).fetchone()
+        if row is None and (isinstance(name_or_id, int) or str(name_or_id).isdigit()):
+            row = conn.execute(
+                "SELECT * FROM mapping_profiles WHERE id = ?", (int(name_or_id),)
+            ).fetchone()
+    return _mapping_row(dict(row)) if row else None
+
+
+def find_mapping_by_fingerprint(fingerprint: str,
+                                db_path: Path | str | None = None) -> Optional[dict[str, Any]]:
+    """按源列名指纹找最合适的已存方案（列集合一致时优先，其次取最新）。"""
+    with session(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM mapping_profiles WHERE fingerprint = ? "
+            "ORDER BY updated_at DESC, id DESC LIMIT 1",
+            (fingerprint,),
+        ).fetchone()
+    return _mapping_row(dict(row)) if row else None
+
+
+def delete_mapping_profile(name_or_id: str | int,
+                           db_path: Path | str | None = None) -> bool:
+    record = get_mapping_profile(name_or_id, db_path)
+    if not record:
+        return False
+    with session(db_path) as conn:
+        conn.execute("DELETE FROM mapping_profiles WHERE id = ?", (record["id"],))
+    return True

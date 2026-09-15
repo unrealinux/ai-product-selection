@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from .config import DEFAULT_WEIGHTS
@@ -35,6 +36,18 @@ def linear_map(value: float, in_low: float, in_high: float,
         return out_low
     ratio = (value - in_low) / (in_high - in_low)
     return clamp(out_low + ratio * (out_high - out_low), min(out_low, out_high), max(out_low, out_high))
+
+
+def log_scale(value: float, best: float, low: float = 0.0, high: float = 100.0) -> float:
+    """对数映射：value 达到 ``best`` 时得 ``high`` 分，0 或负数得 ``low`` 分。
+
+    用于销量、在售商品数这类**跨数量级**的指标 —— 销量 100 和 10000 的差距，
+    远大于 10000 和 19900 的差距，线性映射会失真。
+    """
+    if value <= 0 or best <= 0:
+        return low
+    ratio = math.log10(value + 1) / math.log10(best + 1)
+    return round(clamp(low + ratio * (high - low), low, high), 2)
 
 
 def profit_margin(price: float, cost: float) -> float:

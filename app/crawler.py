@@ -85,7 +85,7 @@ SOURCES: dict[str, type[Source]] = {
 }
 
 #: 需要第三方依赖或凭据、延迟导入的数据源（名字 → 获取实例的工厂）
-LAZY_SOURCES = ("douyin",)
+LAZY_SOURCES = ("douyin", "table")
 
 
 def _build_douyin(path: Path | str | None, options: dict):
@@ -96,6 +96,15 @@ def _build_douyin(path: Path | str | None, options: dict):
     if path and "keywords" not in options:
         options["keywords"] = [item.strip() for item in str(path).split(",") if item.strip()]
     return DouyinSource(**options)
+
+
+def _build_table(path: Path | str | None, options: dict):
+    """构造表格数据源（CSV / Excel）。"""
+    from .tabular import TabularSource
+
+    if not path:
+        raise ValueError("table 数据源必须提供文件路径（path）")
+    return TabularSource(path, **options)
 
 
 def get_source(name: str, path: Path | str | None = None,
@@ -112,6 +121,8 @@ def get_source(name: str, path: Path | str | None = None,
         raise KeyError(f"未知数据源 {name!r}，可选：{available}")
 
     if name in LAZY_SOURCES:
+        if name == "table":
+            return _build_table(path, options or {})
         return _build_douyin(path, options or {})
 
     cls = SOURCES[name]

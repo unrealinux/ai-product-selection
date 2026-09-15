@@ -30,7 +30,7 @@ from typing import Any, Iterable, Mapping, Optional
 from ..config import settings
 from ..crawler import Source
 from ..models import ProductIn
-from ..scoring import clamp, linear_map
+from ..scoring import clamp, linear_map, log_scale
 
 logger = logging.getLogger(__name__)
 
@@ -575,18 +575,12 @@ def _to_float(value: Any, default: float = 0.0) -> float:
 
 def sales_to_heat(sales: int) -> float:
     """历史销量 → 需求热度（对数映射，0 销量记 0 分）。"""
-    if sales <= 0:
-        return 0.0
-    ratio = math.log10(sales + 1) / math.log10(SALES_FOR_MAX_HEAT + 1)
-    return round(clamp(ratio * 100.0), 2)
+    return log_scale(sales, SALES_FOR_MAX_HEAT)
 
 
 def in_sale_count_to_competition(total: int) -> float:
     """同条件在售商品数 → 竞争度（对数映射，越多越卷）。"""
-    if total <= 0:
-        return 0.0
-    ratio = math.log10(total + 1) / math.log10(PRODUCTS_FOR_MAX_COMPETITION + 1)
-    return round(clamp(ratio * 100.0), 2)
+    return log_scale(total, PRODUCTS_FOR_MAX_COMPETITION)
 
 
 def commission_to_virality(commission_ratio: float) -> float:

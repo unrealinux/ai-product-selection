@@ -5,6 +5,9 @@ uvicorn[standard]>=0.29
 # 前端看板
 streamlit>=1.49
 
+# 表格导入（Excel）
+openpyxl>=3.1
+
 # 配置与校验
 pydantic>=2.6
 python-dotenv>=1.0

@@ -13,11 +13,12 @@ env/
 .env
 
 # 数据库
-# 注：data/cache/ 是估算缓存，不想保留可直接删除
+# 注：data/cache/（估算缓存）与 data/uploads/（上传的临时表格）不想保留可直接删
 data/*.db
 data/*.db-shm
 data/*.db-wal
 data/cache/
+data/uploads/
 *.sqlite3
 
 # 工具缓存

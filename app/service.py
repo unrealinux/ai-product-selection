@@ -216,3 +216,71 @@ def snapshot_sensitivity(run_id: int, top_n: int = 10) -> list[Any]:
     if run is None:
         raise KeyError(f"快照 {run_id} 不存在")
     return weight_sensitivity(db.get_run_items(run_id), run["weights"], top_n=top_n)
+
+
+# --------------------------------------------------------------------------- #
+# 表格导入（CSV / Excel）
+# --------------------------------------------------------------------------- #
+
+def preview_table(path, mapping: Optional[dict[str, Any]] = None,
+                  db_path: Any = None, **options: Any) -> tuple[Any, Any, Any]:
+    """读表 + 确定列映射 + 试算，不写库。供 UI 预览与确认。
+
+    映射优先级：显式传入 > 指纹命中的已存方案 > 自动推断。
+
+    Returns:
+        ``(TableData, ColumnMapping, BuildResult)``
+    """
+    from . import tabular
+
+    source = tabular.TabularSource(path, mapping=mapping, **options)
+    data = source.load()
+
+    resolved = None
+    if mapping is None:
+        record = db.find_mapping_by_fingerprint(
+            tabular.column_fingerprint(data.columns), db_path
+        )
+        if record:
+            resolved = tabular.ColumnMapping.from_dict(record["mapping"])
+            resolved.source = source.source_label or resolved.source
+    if resolved is None:
+        resolved = source.resolve_mapping(data.columns)
+
+    return data, resolved, tabular.build_products(data, resolved)
+
+
+def import_table(path, mapping: Optional[dict[str, Any]] = None,
+                 save_as: str = "", db_path: Any = None,
+                 **options: Any) -> dict[str, Any]:
+    """把表格文件导入商品库。
+
+    Args:
+        mapping: 显式列映射；为空时先查指纹缓存的方案，再退到自动推断。
+        save_as: 非空时把本次使用的映射存为该名字的方案，下次自动复用。
+    """
+    from . import tabular
+
+    data, resolved, result = preview_table(path, mapping=mapping,
+                                           db_path=db_path, **options)
+    if not result.products:
+        detail = "；".join(result.warnings) if result.warnings else "未解析出任何商品"
+        raise ValueError(detail)
+
+    if save_as:
+        db.upsert_mapping_profile(
+            save_as, tabular.column_fingerprint(data.columns),
+            resolved.to_dict(), data.columns, db_path,
+        )
+
+    products = tabular.apply_provenance(result.products, result.provenance)
+    saved = db.bulk_upsert(products, db_path)
+    return {
+        "table": data.describe(),
+        "columns": list(data.columns),
+        "mapping": resolved.to_dict(),
+        "saved": len(saved),
+        "skipped": result.skipped,
+        "warnings": list(result.warnings),
+        "provenance": result.provenance,
+    }

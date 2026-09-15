@@ -292,6 +292,129 @@ python scripts/douyin_fetch.py --keywords "咖啡" --enrich-judge --override-hea
 
 ---
 
+## 表格导入（CSV / Excel）
+
+**为什么需要它**：1688 开放平台的文档需要登录才能查看，API 权限又按应用逐个审批，
+所以我无法在**核实签名算法**的前提下直接接官方 API（证据见本节末尾）。
+但扩品类不必等 —— 1688 商家后台 / 分销后台都能导出商品表，
+本模块负责把这类表格变成选品库里的商品。
+
+### 用法
+
+```bash
+# 1. 先预览，确认自动识别无误（不写库）
+python scripts/import_table.py --file 1688导出.csv --preview
+
+# 2. 确认后入库，保存映射方案，导入完立刻打分
+python scripts/import_table.py --file 1688导出.csv --import \
+    --save-profile 1688 --markup 2.5 --score
+
+# 3. 下次导入同结构报表，映射自动套用，不用重配
+python scripts/import_table.py --file 1688导出-新一期.csv --import --score
+```
+
+Streamlit 的 **📄 表格导入** 页签有同样的流程：上传 → 逐字段确认映射 → 预览 → 导入。
+仓库自带 `data/demo/` 下的 CSV（GBK 编码）与 xlsx 可直接试。
+
+### 支持的表格
+
+| 格式 | 说明 |
+| --- | --- |
+| `.csv` / `.tsv` / `.txt` | 编码自动识别（UTF-8 / GBK / GB18030 / Big5），分隔符自动嗅探 |
+| `.xlsx` / `.xlsm` | 需要 `openpyxl`；可指定工作表 |
+| `.xls` | **不支持**旧二进制格式，会提示另存为 `.xlsx` 或导出 CSV |
+
+### 列名自动识别
+
+内置常见中英文列名别名，两轮匹配（精确 → 包含）：
+
+| 目标字段 | 能识别的列名举例 |
+| --- | --- |
+| 商品标题 | 商品标题、产品名称、宝贝标题、title、product_name |
+| 成本 | 采购价、批发价、进货价、供货价、purchase_price、cost |
+| 销量 | 30天成交、成交笔数、历史销量、sold_count、sales |
+| 重量 | 重量(g)、毛重、净重、weight_kg、gross_weight |
+| 复购 | 复购率、回头率、repurchase_rate |
+
+识别不准时用 `--map` 手工指定（左边可用英文字段名或中文名）：
+
+```bash
+python scripts/import_table.py --file 表.xlsx --preview \
+    --map "商品标题=产品名,成本=供货价,重量=单件重量(g)" --weight-unit g
+```
+
+### 单位与推导
+
+**单位不做猜测**：重量按列名里的 `(g)` / `(kg)` / `(斤)` / `(mg)` 判定，
+金额按 `(元)` / `(分)` / `yuan` / `cny` / `fen` 判定；识别不出就用默认值并在提示里说明。
+注意 `weight`（不含单位标记）**不会**被误判成克 —— 这是最容易出错的地方。
+
+**缺列会被推导**：
+
+| 情况 | 处理 |
+| --- | --- |
+| 只有采购价（1688 的常态） | 售价 = 采购价 × `--markup`（默认 2.5） |
+| 只有销量 | 热度 = 销量对数映射（与抖音数据源同一口径） |
+| 两者都没有 | 该行跳过并计入警告 |
+
+**评分列的量纲按值判定**。真实报表里同一列经常混用两种写法：
+
+| 列里的值 | 解释 |
+| --- | --- |
+| `35%` | 35 |
+| `0.42`（该列其余不带百分号的值都 ≤ 1） | 42 |
+| `35`、`62`（该列存在 > 1 的值） | 35、62 |
+| 同时存在 `0.62` 和 `62`（**都没有百分号**） | **量纲真歧义** → 按 0-100 处理并**报警提示核对**，不静默猜 |
+
+### 映射方案复用
+
+映射按「源列名集合指纹」存库。同一份报表的新一期（列名顺序可能变）再次导入时
+**自动套用**先前保存的方案，包括加价倍数与单位设置。
+
+```bash
+python scripts/import_table.py --file 任意.csv --profiles            # 列出方案
+python scripts/import_table.py --file 任意.csv --delete-profile 1688
+```
+
+### 数据来源写进 note
+
+每个商品的 `note` 会追加来源说明，例如：
+
+```
+来源：表格导入（1688导出示例）；推导：售价 = 采购价 × 3、热度 = 销量对数映射、重量按克换算；
+表中未提供（保持缺省）：竞争度、合规、传播力；表内未使用列：起批量
+```
+
+### 为什么不直接接 1688 官方 API
+
+我试过，但无法在**核实签名算法**的前提下实现：
+
+| 途径 | 结果 |
+| --- | --- |
+| `open.1688.com/doc/*` 文档正文 | 登录墙，正文走 `mtop...getResource` |
+| 直连 mtop | `FAIL_SYS_TOKEN_EMPTY::令牌为空` |
+| `openapi/apiList.json` 接口清单 | `session_not_found` |
+| Googlebot UA 拿预渲染 | 仍是 SPA 空壳 |
+
+**已经核实的**（直接打真实网关，服务端自己报的）：
+
+```
+GET https://gw.open.1688.com/openapi/param2/1/cn.alibaba.open/alibaba.product.search/1234567
+→ {"error_message":"Invalid appKey.","error_code":"gw.AppKeyNotFound"}
+```
+
+即网关路径结构 `…/openapi/param2/1/{命名空间}/{接口名}/{appKey}` 是对的。
+但网关**先校验 appKey 再校验签名**，所以没有真实 appKey 连「签名对不对」都探不到。
+
+签名算法我「大致记得」，但那是记忆不是核实 —— 猜错的话整个采集器就是
+**看起来能跑、实际全错**的死代码。所以宁可不写。
+
+**要接官方 API，需要二者之一**：① 你的 `appKey` / `appSecret`，
+我用真实网关验证签名后接完；② 你登录后把「签名算法」页与目标接口文档页贴给我，
+我照文档逐字对齐实现。
+
+---
+
 ## 权重调参与 A/B 对比
 
 权重决定结论。这套工具把「换权重会怎样」和「哪个维度在真正起作用」变成可测量的问题。
@@ -514,20 +637,24 @@ ai-product-selection/
 │   ├── scoring.py     # 规则打分引擎（纯函数，可单测）
 │   ├── weights.py     # 权重方案：预设 / 校验 / 归一化
 │   ├── compare.py     # 快照对比与维度影响力（Spearman / Top-N 重合）
+│   ├── tabular.py     # 表格导入：列名识别 / 单位换算 / 缺列推导
 │   ├── service.py     # 业务编排
 │   ├── enrich.py      # 补齐接口缺失的维度（详情接口 / 大模型估算）
 │   └── sources/
 │       └── douyin.py  # 抖音精选联盟官方 API 客户端 + 字段映射
 ├── data/
+│   ├── demo/          # 示例表格（GBK 的 CSV + xlsx）
 │   └── sample_products.json
 ├── scripts/
 │   ├── douyin_fetch.py
+│   ├── import_table.py
 │   ├── tune_weights.py
 │   └── seed_data.py
 ├── tests/
 │   ├── test_douyin.py
 │   ├── test_enrich.py
 │   ├── test_compare.py
+│   ├── test_tabular.py
 │   └── test_scoring.py
 ├── streamlit_app.py
 ├── conftest.py
@@ -548,6 +675,8 @@ pytest -q
 - [ ] 采集器：1688 / 亚马逊榜单
 - [x] 让 LLM 判断 `heat` / `virality` / 类目名（`--enrich-judge`，按字段区分覆盖策略）
 - [x] 权重在线调参与 A/B 对比（快照 + Spearman + 维度影响力）
+- [x] 表格导入（CSV / Excel）：列名识别、单位换算、缺列推导、映射方案复用
+- [ ] 1688 官方 API 采集器 —— **阻塞**：签名算法需官方文档或真实 appKey 才能核实（见上文）
 - [ ] 用真实转化率回测权重（目前只能比排序差异，还不能回答「哪套权重更赚钱」）
 - [ ] 选品结果导出为采购单 / 上架任务
 

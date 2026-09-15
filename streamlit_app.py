@@ -22,6 +22,16 @@ from app.sources.douyin import (
     DouyinConfigError,
     DouyinSource,
 )
+from app.tabular import (
+    FIELD_LABELS,
+    PRICE_UNIT_LABELS,
+    WEIGHT_UNIT_LABELS,
+    ColumnMapping,
+    build_products,
+    is_excel,
+    list_sheets,
+    read_table,
+)
 from app.weights import DIMENSIONS, PRESETS, describe, normalize, preset_weights
 
 st.set_page_config(page_title="AI 选品库", page_icon="🛒", layout="wide")
@@ -375,6 +385,144 @@ def page_douyin() -> None:
         "也可走命令行：`python scripts/douyin_fetch.py --keywords \"咖啡\" --pages 2 --dry-run`"
         " ｜ `--check` 打印配置状态与维度来源"
     )
+
+
+def page_table_import() -> None:
+    st.subheader("表格导入（CSV / Excel）")
+    st.caption(
+        "适用于走不了官方 API 的渠道：1688 商家后台/分销后台导出的商品表、"
+        "第三方数据服务导出的 Excel、手工整理的 CSV。"
+        "列名会自动识别，映射可存成方案下次自动复用。"
+    )
+
+    profiles = db.list_mapping_profiles()
+    with st.expander(f"已保存的映射方案（{len(profiles)} 个）", expanded=not profiles):
+        if profiles:
+            st.dataframe(
+                pd.DataFrame([
+                    {"ID": p["id"], "名称": p["name"], "列数": len(p["columns"]),
+                     "源列": "、".join(p["columns"][:4]) + ("…" if len(p["columns"]) > 4 else "")}
+                    for p in profiles
+                ]),
+                width="stretch", hide_index=True,
+            )
+            target = st.selectbox("删除方案", ["（不删除）", *[p["name"] for p in profiles]])
+            if target != "（不删除）" and st.button(f"确认删除「{target}」"):
+                db.delete_mapping_profile(target)
+                flash("success", f"已删除映射方案「{target}」")
+                st.rerun()
+        else:
+            st.caption("导入时勾选「保存为方案」，下次同结构的报表就会自动套用同一套列映射。")
+
+    uploaded = st.file_uploader(
+        "上传表格文件", type=["csv", "tsv", "txt", "xlsx", "xlsm", "xls"],
+        help="CSV 支持 UTF-8 / GBK 等编码自动识别；Excel 需要 openpyxl。",
+    )
+    if uploaded is None:
+        sample_dir = settings.base_dir / "data" / "demo"
+        if sample_dir.exists():
+            st.info(f"没有文件？可以用仓库自带的示例：`{sample_dir}` 下的 CSV 与 xlsx。")
+        return
+
+    upload_dir = settings.base_dir / "data" / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    path = upload_dir / uploaded.name
+    path.write_bytes(uploaded.getvalue())
+
+    sheet: object = 0
+    if is_excel(path):
+        sheets = list_sheets(path)
+        if sheets:
+            sheet = st.selectbox("工作表", sheets)
+
+    try:
+        table = read_table(path, sheet=sheet)
+    except Exception as exc:  # noqa: BLE001 - 用户上传的文件什么情况都可能有
+        st.error(f"读取失败：{exc}")
+        return
+
+    if not table.columns:
+        st.warning("没有读到任何列，请确认文件不是空的。")
+        return
+    st.success(f"已读取：{table.describe()}")
+
+    st.markdown("#### 1. 列映射")
+    auto_mapping = ColumnMapping.auto(table.columns)
+    untitled = ["（不使用）", *table.columns]
+    fields: dict[str, str] = {}
+    columns_of_widgets = st.columns(3)
+    for index, target in enumerate(FIELD_LABELS):
+        with columns_of_widgets[index % 3]:
+            default = auto_mapping.fields.get(target)
+            chosen = st.selectbox(
+                FIELD_LABELS[target], untitled,
+                index=untitled.index(default) if default in untitled else 0,
+                key=f"tbl_map_{target}",
+            )
+            if chosen != "（不使用）":
+                fields[target] = chosen
+
+    st.markdown("#### 2. 单位与推导")
+    col1, col2, col3 = st.columns(3)
+    weight_unit = col1.selectbox(
+        "重量单位", list(WEIGHT_UNIT_LABELS),
+        index=list(WEIGHT_UNIT_LABELS).index(auto_mapping.weight_unit),
+        format_func=lambda key: WEIGHT_UNIT_LABELS[key],
+    )
+    price_unit = col2.selectbox(
+        "金额单位", list(PRICE_UNIT_LABELS),
+        index=list(PRICE_UNIT_LABELS).index(auto_mapping.price_unit),
+        format_func=lambda key: PRICE_UNIT_LABELS[key],
+    )
+    markup = col3.number_input(
+        "加价倍数（只有采购价时推导售价）", 1.0, 20.0, 2.5, step=0.1,
+        help="1688 导出的是采购价。售价 = 采购价 × 该倍数。",
+    )
+
+    mapping = ColumnMapping(
+        fields=fields, price_unit=price_unit, weight_unit=weight_unit,
+        markup=float(markup), source=path.stem,
+    )
+    result = build_products(table, mapping)
+
+    st.markdown("#### 3. 预览")
+    st.caption(result.summary())
+    for warning in result.warnings:
+        st.warning(warning)
+
+    if not result.products:
+        st.error("没有解析出任何商品。请确认「商品标题」列已映射，且存在价格列。")
+        return
+
+    st.dataframe(
+        pd.DataFrame([
+            {"商品": item.title, "类目": item.category,
+             "售价": item.price, "成本": item.cost,
+             "毛利率": f"{(item.price - item.cost) / item.price:.0%}" if item.price else "—",
+             "热度": item.heat, "复购": item.repurchase,
+             "合规": item.compliance_risk, "重量(kg)": item.weight_kg}
+            for item in result.products
+        ]),
+        width="stretch", hide_index=True,
+    )
+    st.caption(f"数据说明：{result.provenance}")
+
+    st.markdown("#### 4. 导入")
+    col_a, col_b = st.columns([2, 1])
+    save_name = col_a.text_input("保存为映射方案（留空则不保存）", placeholder="例如：1688")
+    if col_b.button("导入数据库", type="primary"):
+        try:
+            report = service.import_table(
+                path, mapping=mapping.to_dict(), save_as=save_name,
+                markup=float(markup), source_label=path.stem,
+            )
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            flash("success", f"已导入 {report['saved']} 个商品"
+                  + (f"，跳过 {report['skipped']} 行" if report["skipped"] else "")
+                  + (f"；映射已存为「{save_name}」" if save_name else ""))
+            st.rerun()
 
 
 def page_create() -> None:
@@ -774,19 +922,21 @@ def main() -> None:
     st.title("🛒 AI 选品库")
     st.caption("规则引擎 + 大模型的多维度选品打分与排序")
 
-    tabs = st.tabs(["📊 选品榜单", "📥 数据导入", "🎯 抖音拉取", "⚖️ 权重调参",
+    tabs = st.tabs(["📊 选品榜单", "📥 数据导入", "📄 表格导入", "🎯 抖音拉取", "⚖️ 权重调参",
                     "➕ 商品录入", "📈 数据概览"])
     with tabs[0]:
         page_leaderboard()
     with tabs[1]:
         page_import()
     with tabs[2]:
-        page_douyin()
+        page_table_import()
     with tabs[3]:
-        page_tuning()
+        page_douyin()
     with tabs[4]:
-        page_create()
+        page_tuning()
     with tabs[5]:
+        page_create()
+    with tabs[6]:
         page_stats()
 
 
