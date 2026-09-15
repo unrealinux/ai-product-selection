@@ -525,6 +525,134 @@ def page_table_import() -> None:
             st.rerun()
 
 
+def page_taobao() -> None:
+    st.subheader("淘宝拉取（官方 A2A 接口）")
+    st.caption(
+        "走淘宝官方公开的 Agent2Agent 服务端，**不需要 appKey、不需要内测资格**。"
+        "与本地那个被内测门槛拦着的 `taobao-native` CLI 不是同一套东西。"
+    )
+
+    from app.sources.taobao import (
+        SORT_OPTIONS,
+        TaobaoA2AClient,
+        TaobaoA2AError,
+        TaobaoSource,
+        TaobaoTaskFailed,
+    )
+
+    st.warning(
+        "**价格陷阱已内置防护**：搜索页价格 ≠ 真实售价（实测同一商品 44.9 vs 79.9，差 78%）。"
+        "因此默认**拿不到详情就丢弃该商品**，而不是退回去用搜索价 ——"
+        "毛利率是权重最高的维度，用错价格整个排序就是错的。"
+    )
+
+    with st.form("taobao_fetch_form"):
+        queries = st.text_input("搜索关键词（逗号分隔，每个词一次召回）",
+                                value="", placeholder="例如：保温杯,降噪耳机")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            limit = st.number_input("每个关键词召回数", 1, 100, 20, step=5)
+        with col2:
+            sort = st.selectbox("召回排序", list(SORT_OPTIONS), index=0)
+        with col3:
+            max_detail = st.number_input(
+                "最多取多少个详情（0=不限）", 0, 100, 20, step=5,
+                help="每个商品一次详情调用，控制次数用。item-detail 单批上限 10 个。",
+            )
+
+        col4, col5, col6 = st.columns(3)
+        with col4:
+            keep_ads = st.checkbox("保留广告位商品", value=False,
+                                   help="默认过滤 isAd=true 的坑位。")
+        with col5:
+            neutral_heat = st.checkbox("热度取中性值 50", value=False,
+                                       help="默认用销量排序位次做热度代理。")
+        with col6:
+            no_weight = st.checkbox("不抽重量", value=False,
+                                    help="默认从 SKU 名/标题抽重量（只认 g/kg，不认 ml）。")
+
+        allow_missing = st.checkbox(
+            "⚠️ 允许无详情时保留（会拿搜索页价格当售价）", value=False,
+            help="不建议开。开了之后 note 里会带 ⚠️ 标注。",
+        )
+        submitted = st.form_submit_button("开始拉取", type="primary")
+
+    if submitted:
+        keywords = [q.strip() for q in queries.replace("，", ",").split(",") if q.strip()]
+        if not keywords:
+            st.error("请至少填一个搜索关键词。")
+            return
+        source = TaobaoSource(
+            keywords,
+            limit=int(limit), sort=sort, max_detail=int(max_detail),
+            drop_ads=not keep_ads,
+            require_detail=not allow_missing,
+            heat_mode="neutral" if neutral_heat else "rank",
+            extract_weight=not no_weight,
+            client=TaobaoA2AClient.from_settings(),
+        )
+        try:
+            with st.spinner("正在调用淘宝 A2A…"):
+                products = source.fetch()
+        except TaobaoTaskFailed as exc:
+            st.error(f"A2A 任务失败：{exc.message or exc}")
+            return
+        except TaobaoA2AError as exc:
+            st.error(f"A2A 调用失败：{exc}")
+            st.info("接口是内测中的公开能力，可能暂时不可用。可用 `--check` 确认 agent card 是否可达。")
+            return
+
+        st.session_state["taobao_products"] = products
+        st.session_state["taobao_report"] = {
+            "summary": source.report.summary(),
+            "warnings": list(source.report.warnings),
+            "notes": list(source.report.notes),
+        }
+        flash("success", source.report.summary())
+        st.rerun()
+
+    report = st.session_state.get("taobao_report")
+    if report:
+        for warning in report["warnings"]:
+            st.warning(warning)
+        for note in report.get("notes") or []:
+            st.info(note)
+
+    products = st.session_state.get("taobao_products") or []
+    if products:
+        st.markdown(f"#### 拉取结果（{len(products)} 条）")
+        frame = pd.DataFrame([
+            {"商品": item.title, "类目": item.category, "售价": item.price,
+             "需求热度": item.heat, "重量(kg)": item.weight_kg,
+             "链接": item.url, "数据说明": item.note.split(PROVENANCE_SEP, 1)[-1]}
+            for item in products
+        ])
+        st.dataframe(frame, width="stretch", hide_index=True)
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            st.download_button(
+                "导出 CSV", frame.to_csv(index=False).encode("utf-8-sig"),
+                file_name="taobao_products.csv", mime="text/csv",
+            )
+        with col_b:
+            if st.button("导入数据库并打分", type="primary"):
+                saved = service.import_products(products)
+                results = service.score_all()
+                flash("success", f"已导入 {len(saved)} 条，打分 {len(results)} 条。")
+                st.rerun()
+        with col_c:
+            if st.button("清空本次结果"):
+                st.session_state.pop("taobao_products", None)
+                st.session_state.pop("taobao_report", None)
+                st.rerun()
+
+    st.divider()
+    st.caption(
+        "也可走命令行：`python scripts/taobao_fetch.py --check`（自检 agent card）；"
+        "`--queries \"保温杯\" --preview`；`--compare ID1,ID2`（结构化对比）"
+    )
+
+
 def page_create() -> None:
     st.subheader("商品录入")
     with st.form("create_product"):
@@ -922,8 +1050,8 @@ def main() -> None:
     st.title("🛒 AI 选品库")
     st.caption("规则引擎 + 大模型的多维度选品打分与排序")
 
-    tabs = st.tabs(["📊 选品榜单", "📥 数据导入", "📄 表格导入", "🎯 抖音拉取", "⚖️ 权重调参",
-                    "➕ 商品录入", "📈 数据概览"])
+    tabs = st.tabs(["📊 选品榜单", "📥 数据导入", "📄 表格导入", "🎯 抖音拉取", "🛒 淘宝拉取",
+                    "⚖️ 权重调参", "➕ 商品录入", "📈 数据概览"])
     with tabs[0]:
         page_leaderboard()
     with tabs[1]:
@@ -933,10 +1061,12 @@ def main() -> None:
     with tabs[3]:
         page_douyin()
     with tabs[4]:
-        page_tuning()
+        page_taobao()
     with tabs[5]:
-        page_create()
+        page_tuning()
     with tabs[6]:
+        page_create()
+    with tabs[7]:
         page_stats()
 
 

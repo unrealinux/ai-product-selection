@@ -85,7 +85,7 @@ SOURCES: dict[str, type[Source]] = {
 }
 
 #: 需要第三方依赖或凭据、延迟导入的数据源（名字 → 获取实例的工厂）
-LAZY_SOURCES = ("douyin", "table")
+LAZY_SOURCES = ("douyin", "table", "taobao")
 
 
 def _build_douyin(path: Path | str | None, options: dict):
@@ -96,6 +96,16 @@ def _build_douyin(path: Path | str | None, options: dict):
     if path and "keywords" not in options:
         options["keywords"] = [item.strip() for item in str(path).split(",") if item.strip()]
     return DouyinSource(**options)
+
+
+def _build_taobao(path: Path | str | None, options: dict):
+    """构造淘宝 A2A 数据源。``path`` 可传逗号分隔的搜索关键词。"""
+    from .sources.taobao import TaobaoSource
+
+    options = dict(options)
+    if path and "queries" not in options:
+        options["queries"] = [item.strip() for item in str(path).split(",") if item.strip()]
+    return TaobaoSource(**options)
 
 
 def _build_table(path: Path | str | None, options: dict):
@@ -123,6 +133,8 @@ def get_source(name: str, path: Path | str | None = None,
     if name in LAZY_SOURCES:
         if name == "table":
             return _build_table(path, options or {})
+        if name == "taobao":
+            return _build_taobao(path, options or {})
         return _build_douyin(path, options or {})
 
     cls = SOURCES[name]

@@ -1,0 +1,100 @@
+{
+ "jsonrpc": "2.0",
+ "result": {
+  "task": {
+   "id": "7e62886a-31a6-43d7-8cfe-042050174043",
+   "contextId": "d55914a4-6868-48ee-97c6-0205fbb89181",
+   "status": {
+    "state": "TASK_STATE_COMPLETED",
+    "message": null,
+    "timestamp": "2026-09-15T06:40:57.109886350Z"
+   },
+   "artifacts": [
+    {
+     "artifactId": "ddce11db-1722-40f7-9a26-2d94bcc1020f",
+     "name": "search-candidates",
+     "description": null,
+     "parts": [
+      {
+       "data": {
+        "result": "已召回 5 个 '保温杯' 候选商品",
+        "data": {
+         "skillId": "item-search",
+         "products": [
+          {
+           "itemId": "1060199595825",
+           "title": "炊大皇轻巧便携口袋杯316L不锈钢迷你<span class=H>保温杯</span>新款女生高颜值水杯子",
+           "auctionURL": "http://click.simba.taobao.com/cc_im?p=%B1%A3%CE%C2%B1%AD&s=1742154598&k=2509&e=GDQbEcfQi803%2FlP3r2C03WZpeadNLqj47vVCJDUz3Aj3pxNDhgoySj2Uls00nCjHwNHcdPOwm0yM4TIyjdFPzWd0GHiUPmg4VyWtlpOY%2B98voRmk1B8nYJ4AKx%2Fu6WNZRjeinZvBImrsaumFxGE2DA%2FODKvvVyUCNuShM3ZUITwavedA3AQ2qBeQXNdXcEw4ABVhB%2BDixKr5JeHYA0Cj5WdetDjsOePQfWEwguOBllu%2FtfjTgkZsOuYNR7YP1fob0TLRFdssLm297zOQgT2scTMct97AahKkISwDAsSpz%2FL00bupGd0KqlLzXht0QPhLc0ZeadeecjUuEmD9TLrk2qQPh10Ly%2FNrlwvcSVyOa3F9CgI6a0%2FnrdQdZvMORlmrNyzJkI53TEr6xF%2BNA3MjfbKz82UDb%2B3D0Ss7DGOBLym4g9hXexmU9xt2SweDGrxQeretorFdifQBi0gLfq4xLEAiFH5u%2FNpRzz8sDWQIeS5AxYxR7lS3G8EMSk%2FtOSic9AKfvBcanU12sdYH1UQF71%2F1oHD4JrOsADR8%2BpL1v0PFL%2FeLd2deerBKmFSabvbBTOmy2fZi3z0oT1B9cPmsFMhhEYexjfe8r6YaO%2F2b65Wd9qj5ZjMvehBFSM9SuEniQoaxUJ0mO2BpphvJ8k7Y8Sr0z99RmfNIG%2BQn9ZIKh07Z7XnnYg19Qmt47gMy7Ypte3wzf50jJjW6oSocPqpUbJvYWkuky0%2BLjDf1k4SsuggI4nQ4UsR5SSQTldwj1h5%2FGI5shhvpJRHN9pZ3stO1k1ZOMbjJJyKF7z%2BQ1nOfJfo%2BR6XsOHq2vwBQXGGWCXFsLo0SYS%2F86ftEVCv%2BkzisOgsWcsjJjnUq2jqN5AYhHDBi5nnbt2atOobJkVDrtjEubitizUikZIAr9G7RGKiyeMRd%2Bs4U6oYOR9FUSx7BsnidmwEoxI0NGELt6g2jf11i1BSNMEsZl4xbdt%2BduGQRS2VfmnHbOY9YlqJmrkyjQMjvdSXKEI%2FoYQSpzZdSmjkgd4vawGTKCpvkbpSWKDO82i2y0cDP%2FANsfbKfvr7IspfordXMApbVjI3eZHKDu11i5AVFu3Z4CcQKSFtSdUC3jxKH5hx8CdmsJEPrnFLFx3O1Bx0lMbh4pBdp%2BuvzFjp%2BG0gOfyjBn61st1D7B%2FMHNF4nOH8HOKtTvG1tyaNP%2Bf15TBk4VogdGx8%2B%2FndnnWfoqod%2Fi7OKEutUvLCiCU0NDfWGfjtPCpsAQxYGmWpVUh386xx7EREKP9cCdvw7VfkgR5j2gWq5RB0i%2FKfZSr7GnWfLprnA0pH0gUJ9tlD1aky8LoecFXzqSIlQrp0tqa7EZTKg7leJ2MnMp7xruG%2FRT33c6k4UUiBnLZsGnea2gQOKVa3ViTchv7Exos%2BXS6SzYw1eA1M92dzfy6Q0JxRoeqKj5nhv8oYny1E9B%2B3ZqBhBkxSXhGvtw17kbrf0Rhl0Iicmj6FjOnd2h%2BHdYW%2FO0sJWnz%2F4N%2B2OlqJmrkyjQMhEa%2BiusQvLsGR8%2FYz5RSROHMLukMkK8Shjr6aM4O3ukaRrIAH0lR6%2BCCi92aaTx1j5xcmQVffa4X0DnfDivaRXV4xzMIgVgxXN9pZ3stO1kzVOzreJVnPBg03TtqfIluxwXob6%2B4Xrf3qVH5pc28QaCqsC8DQ9%2FYMDhQdjQb9MxPIP1E%2FAdELnq%2BfIEA3MZ9baODLkQ8qT0FdCKTo3EUXPyD%2FBw9mJqbUeGeOAGpruLfGjJLClzR4RezS%2FLu5nvBihFDC5MrARBfwcuC8QKHIXA4BOzdC%2BStqeACsf7uljWUY3op2bwSJq7GrphcRhNgz%2Fo65hOh4%2FnUmoYiPM%2Bu2B4PapCFmGo2ZpQuYM198QZDU3XzIj9Mya1Purv%2BsHaHE2VqN5WAfeAxQ%2FuEZRPcaTcyZ4uQKplouKeOoLQ8fL2q6xDSNwaLOLI8RO64m7AlFi6%2F%2BQU8SA%2FxAL8hfFnQC16NpIlRtnl6Xq%2B9Zn9qMZYtoR0BtEuFkF00GwOD%2BAJfBO6UEM26zI3%2B9sWa1Gv92MiD%2BISGPuozKPYVDESuC7CrHR%2BMOR4MTjT76MaJMYV1Q0%2BBh5Jl%2FzCXo%2BFXsVhaEWQOUfy1Nm%2BBcZeUavG6vEgVme5rHv%2BPk8hAhZPoEIozHAim%2BgJhW6cyrw2IZJjCtfDtZ5wQujxNJeMujkO0FDP4zZJUBRK9yLLTayrL8%2Fm1Hmr6H6DaZy8lPHfBpt4nzzuPARIYUsNPReyerjmxUd74K5umMxgRX8G3XifptJlqYLjf%2BqvurMyuczsR3kExn9FeE8bnqey8WcANRs9FuPF5EasL9rlO7LVe72W%2F5ai4xuAVDhbbVvhzaeIO%2FGnPy7635j1U5BqUWJI%2BSM%2Fq8pBNTBA8UNfXqWMQhUbfyOKPxx9FWSEnVqcoXlzMFFqLBkJX65Vyly1BEdHE11oLXdKx2v8I0Jludevbhc45dB70nN9pZ3stO1k41F175p2VIyBcW4dAUNjig%3D&eadt=282&mm_sceneid=1_0_28741588_0_0&a=xxc%3Dad_ztc%26mi_id%3D0000aACL0B4yyIYIIdwnSmk25la5Kkih3jJctc3lyDSrt60%26skuId%3D6111160780055&id=1060199595825",
+           "price": "44.9",
+           "picPath": "https://img.alicdn.com/imgextra/i1/735011836/O1CN01kQHOkAMg5SE1chua_!!735011836-0-alimamacc.jpg",
+           "shopName": "炊大皇官方旗舰店",
+           "realSales": "本月行业热销",
+           "procity": "浙江 金华",
+           "isAd": true,
+           "source": "a2a"
+          },
+          {
+           "itemId": "973592811340",
+           "title": "304不锈钢迷你小巧150ml新款<span class=H>保温</span><span class=H>杯</span>便携男女高颜值ins小水<span class=H>杯</span>",
+           "auctionURL": "//item.taobao.com/item.htm?id=973592811340&ns=1&abbucket=0&xxc=taobaoSearch&mi_id=0000NM47dg46rRL6EcOpW6eSmSA4huzFxKyZa513N3OzGas&skuId=6093481467995",
+           "price": "9.47",
+           "picPath": "https://g-search1.alicdn.com/img/bao/uploaded/i4/i3/2220005877660/O1CN010fJqCk26SL0KZ2oMK_!!2220005877660.jpg",
+           "shopName": "超值严选购",
+           "realSales": "2万+人收货",
+           "procity": "北京",
+           "isAd": false,
+           "source": "a2a"
+          },
+          {
+           "itemId": "571751188461",
+           "title": "【自营】膳魔师<span class=H>保温</span><span class=H>杯</span>车载大容量便携简约不锈钢水<span class=H>杯</span>男女生水<span class=H>杯</span>子",
+           "auctionURL": "//detail.tmall.com/item.htm?id=571751188461&ns=1&abbucket=0&xxc=taobaoSearch&mi_id=0000iX3tpdY6elpj63-M4Yup_A3icI1blT2ZmB0YQd6XVlU&skuId=4493467144200",
+           "price": "98",
+           "picPath": "https://g-search3.alicdn.com/img/bao/uploaded/i4/i1/2549841410/O1CN01MhSFExHH0lB1chua_!!2549841410-0-tmg_sticker_hand.jpg",
+           "shopName": "天猫国际自营全球超级店",
+           "realSales": "1万+人收货",
+           "procity": "浙江 杭州",
+           "isAd": false,
+           "source": "a2a"
+          }
+         ],
+         "rawCount": 46,
+         "productCount": 5
+        }
+       }
+      }
+     ],
+     "metadata": null,
+     "extensions": null
+    }
+   ],
+   "history": [
+    {
+     "messageId": null,
+     "contextId": null,
+     "taskId": null,
+     "role": "user",
+     "parts": [
+      {
+       "data": {
+        "query": "保温杯",
+        "sort": "sales_desc",
+        "limit": 5
+       }
+      }
+     ],
+     "metadata": null,
+     "extensions": null,
+     "referenceTaskIds": null
+    }
+   ],
+   "metadata": {
+    "skillId": "item-search",
+    "query": "保温杯",
+    "rawCount": 46,
+    "productCount": 5
+   }
+  }
+ },
+ "id": "576e3d9c-6ea0-4ad1-aa8e-46035d49ae3e"
+}

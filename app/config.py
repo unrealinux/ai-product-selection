@@ -94,6 +94,24 @@ class Settings:
     )
     douyin_timeout: int = field(default_factory=lambda: _env_int("APS_DOUYIN_TIMEOUT", 30))
 
+    # ---- 淘宝 A2A（官方公开的 Agent2Agent 接口）----
+    # agent card: {base}/.well-known/agent.json
+    taobao_a2a_url: str = field(
+        default_factory=lambda: os.getenv(
+            "APS_TAOBAO_A2A_URL", "https://pc-taoclaw.taobao.com/a2a/itemSearch"
+        ).rstrip("/")
+    )
+    taobao_timeout: int = field(default_factory=lambda: _env_int("APS_TAOBAO_TIMEOUT", 45))
+    #: 两次 A2A 调用之间的最小间隔（秒）。这是内测中的公开接口，调用要克制
+    taobao_interval: float = field(
+        default_factory=lambda: float(os.getenv("APS_TAOBAO_INTERVAL", "0.8"))
+    )
+    #: item-detail 单批最多几个商品（官方限制 1-10）
+    taobao_detail_batch: int = field(
+        default_factory=lambda: _env_int("APS_TAOBAO_DETAIL_BATCH", 10)
+    )
+    taobao_retries: int = field(default_factory=lambda: _env_int("APS_TAOBAO_RETRIES", 2))
+
     # ---- 维度补齐（重量 / 复购 / 合规，接口未提供）----
     enrich_cache_path: Path = field(
         default_factory=lambda: BASE_DIR

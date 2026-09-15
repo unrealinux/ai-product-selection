@@ -1,0 +1,116 @@
+{
+ "jsonrpc": "2.0",
+ "result": {
+  "task": {
+   "id": "9cb1cb78-bc83-465e-9965-072a6fe34b2a",
+   "contextId": "198ac744-28e6-4eab-b544-ee2b7c2aaf7a",
+   "status": {
+    "state": "TASK_STATE_COMPLETED",
+    "message": null,
+    "timestamp": "2026-09-15T06:41:40.034678323Z"
+   },
+   "artifacts": [
+    {
+     "artifactId": "8b174b90-36b8-4c07-98c3-211acd8f7bbf",
+     "name": "item-detail-result",
+     "description": null,
+     "parts": [
+      {
+       "data": {
+        "result": "已获取 1 个商品的详情",
+        "data": {
+         "itemIds": [
+          "1060199595825"
+         ],
+         "items": [
+          {
+           "itemId": "1060199595825",
+           "title": "炊大皇轻巧便携口袋杯316L不锈钢迷你保温杯新款女生高颜值水杯子",
+           "subTitle": "潮流精品，品质保证",
+           "price": "79.9",
+           "url": "https://item.taobao.com/item.htm?id=1060199595825",
+           "picPath": "//img.alicdn.com/bao/uploaded/i4/735011836/O1CN01fvSdfM1PQwKIrHuBY_!!4611686018427380732-0-item_pic.jpg",
+           "brandName": "COOKER KinG/炊大皇",
+           "shopName": null,
+           "spuName": "COOKER KinG/炊大皇 MN24A1",
+           "defaultSkuName": "【直饮款】初樱粉 240mL 【150g小巧便携+316L内胆】",
+           "skuNames": [
+            "【直饮款】青禾绿 330mL 【180g小巧便携+316L内胆】",
+            "【直饮款】初樱粉 330mL 【180g小巧便携+316L内胆】",
+            "【直饮款】朝露红 330mL 【180g小巧便携+316L内胆】",
+            "【直饮款】朝露红 240mL 【150g小巧便携+316L内胆】",
+            "【直饮款】青禾绿 240mL 【150g小巧便携+316L内胆】",
+            "轻巧口袋杯350ml（奶油粉）",
+            "【直饮款】初樱粉 240mL 【150g小巧便携+316L内胆】",
+            "轻巧口袋杯350ml（奶蓝色）",
+            "轻巧口袋杯350ml（檀木棕）",
+            "轻巧口袋杯350ml（落日黄）",
+            "轻巧口袋杯350ml（奶绿色）",
+            "轻巧口袋杯350ml（小红帽）"
+           ],
+           "itemProperties": {
+            "品牌": "COOKER KinG/炊大皇",
+            "型号": "MN24A1",
+            "杯子种类": "保温杯",
+            "杯盖材质": "PP材质",
+            "保温时长": "12小时",
+            "功能": "保温",
+            "产地": "中国大陆",
+            "适用人群": "通用",
+            "材质": "304不锈钢+316L不锈钢内胆",
+            "是否显示温度": "不支持温度显示",
+            "适用空间": "通用",
+            "包装种类": "简装",
+            "是否带茶隔": "不带茶隔",
+            "杯盖类型": "旋盖",
+            "颜色分类": "1"
+           },
+           "deliveryAddress": null,
+           "deliveryFreight": null,
+           "deliveryAgingDesc": null,
+           "guaranteeInfo": null,
+           "payInfo": null,
+           "subTitles": null
+          }
+         ],
+         "itemCount": 1,
+         "missingItemIds": []
+        }
+       }
+      }
+     ],
+     "metadata": null,
+     "extensions": null
+    }
+   ],
+   "history": [
+    {
+     "messageId": null,
+     "contextId": null,
+     "taskId": null,
+     "role": "user",
+     "parts": [
+      {
+       "data": {
+        "skillId": "item-detail",
+        "itemIds": [
+         "1060199595825"
+        ]
+       }
+      }
+     ],
+     "metadata": null,
+     "extensions": null,
+     "referenceTaskIds": null
+    }
+   ],
+   "metadata": {
+    "skillId": "item-detail",
+    "itemCount": 1,
+    "missingCount": 0,
+    "dataSource": "getitemdetail"
+   }
+  }
+ },
+ "id": "98a50d85-e774-4bd4-bbd7-16eee68206d8"
+}

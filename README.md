@@ -22,7 +22,8 @@ AI 选品库把决策拆成两层：
 
 > 关键设计：**大模型不能推翻规则结果**，只能做有限修正。这避免了 LLM 幻觉直接污染排序，让榜单始终可解释。
 
-数据来源既支持本地 JSON，也内置了**抖音精选联盟官方 API** 采集器（见 [接入抖音](#接入抖音精选联盟官方-api)）。
+数据来源既支持本地 JSON，也内置了**抖音精选联盟官方 API**、**淘宝官方 A2A 接口**、
+**通用 CSV/Excel 导入**三种采集器（见 [接入淘宝](#接入淘宝官方-a2a-接口)）。
 
 ---
 
@@ -289,6 +290,93 @@ python scripts/douyin_fetch.py --keywords "咖啡" --enrich-judge --override-hea
 > 几个容易踩的坑，代码里都已处理：`param_json` 走请求 body 而其余公共参数走 query；
 > 成功码是 `10000` 而非 `0`；`token.create` 不携带 `access_token`；
 > 官方标记 `sign_method` 默认 `md5` 但推荐迁到 `hmac-sha256`，本项目默认用后者。
+
+---
+
+## 接入淘宝（官方 A2A 接口）
+
+走的是淘宝桌面客户端内置的**官方 A2A（Agent2Agent）服务端**，**不需要 appKey、不需要内测资格**。
+
+> 和本地那个 `taobao-native` CLI 不是同一套东西。后者是 DOM 自动化（20 个网页操作工具），
+> 当前账号调用会返回 `内测期间仅开放部分用户使用` —— 那个文案来自 `remote-config.json`
+> 的 `mcpDisabledText` 字段，是**远端开关**。A2A 这条路绕开了它。
+
+契约是公开可验证的（agent card 直接 HTTP 200）：
+
+```
+GET https://pc-taoclaw.taobao.com/a2a/itemSearch/.well-known/agent.json
+POST https://pc-taoclaw.taobao.com/a2a/itemSearch   （JSON-RPC tasks/send）
+```
+
+| skill | 入参 | 返回 artifact |
+| --- | --- | --- |
+| `item-search` | `{"query":"保温杯","sort":"sales_desc","limit":50}` | `search-candidates` |
+| `item-detail` | `{"skillId":"item-detail","itemIds":[...]}`（1-10 个） | `item-detail-result` |
+| `item-compare` | `{"skillId":"item-compare","itemIds":[...]}`（2-5 个） | 对比卡片 |
+
+服务端的报错很好用，会直接告诉你约束（如「itemIds 数量需在 1-10 个之间，当前 0 个」）。
+
+### ⚠️ 价格陷阱（本模块已内置防护）
+
+**搜索页价格 ≠ 真实售价。** 实测同一个保温杯：
+
+| 来源 | 价格 |
+| --- | --- |
+| `item-search` 返回 | **44.9** |
+| `item-detail` 返回 | **79.9** |
+
+**差 78%。** 而毛利率是权重最高的维度（24%）——用搜索价算毛利率，整个榜单就是错的。
+官方 Skill 文档也警告过同样的坑（爱奇艺年卡 ￥88 vs ￥135），我们在另一个类目上独立复现了。
+
+所以默认 **拿不到 `item-detail` 就丢弃该商品**（`require_detail=True`），而不是退回去用搜索价。
+确实想保留时加 `--allow-missing-detail`，但 `note` 里会带 ⚠️ 标注。
+
+### 用法
+
+```bash
+# 自检：确认 agent card 可达、列出声明的 skill
+python scripts/taobao_fetch.py --check
+
+# 试拉取，只看结果不入库
+python scripts/taobao_fetch.py --queries "保温杯,降噪耳机" --limit 30 --preview
+
+# 正式拉取 + 入库 + 打分（--max-detail 控制详情调用次数）
+python scripts/taobao_fetch.py --queries "保温杯" --limit 30 --max-detail 20 \
+    --import --score
+
+# 对 2-5 个商品做结构化对比
+python scripts/taobao_fetch.py --compare 1060199595825,973592811340
+```
+
+Streamlit 的 **🛒 淘宝拉取** 页签有同样的流程：关键词与参数 → 预览 → 导入并打分。
+
+### 字段与维度
+
+| 我们的维度 | 数据来源 |
+| --- | --- |
+| 毛利率 | ✅ `item-detail` 的**真实售价**（`cost` 为空，需另有来源） |
+| 需求热度 | ⚠️ `sort=sales_desc` 下的**位次代理**（`realSales` 是文本如「本月行业热销」，拿不到数字） |
+| 物流友好 | ⚠️ 标题/SKU 名里抽的重量（**只认 g/kg，不认 ml**） |
+| 竞争度 / 复购 / 合规 / 传播力 | ❌ 接口未提供，保持缺省值（可配合 `--enrich` 让大模型估算） |
+
+白拿的额外字段：`isAd`（过滤广告位）、`brandName`／`spuName`、`skuNames`、
+`itemProperties`（**15 个左右的结构化属性**：材质/产地/适用人群/保温时长…）、`procity`（发货地）。
+
+**热度代理的口径**：`sort=sales_desc` 下第 1 名确实比第 50 名卖得多，但它是**相对位次**，
+不同关键词、不同窗口之间不可比。所以返回值刻意压在 40–95 区间而非 0–100，以体现不确定性。
+不想用就加 `--neutral-heat`（一律 50）。
+
+### 顺手能接成闭环
+
+`1688 供货价`（表格导入）× `淘宝 售价`（A2A）→ **真实毛利率**。
+前面两块工作正好串起来：用 1688 导出表作成本，用淘宝详情价作售价。
+
+### 使用边界
+
+- 这是**内测中的公开能力，接口随时可能变**。`--check` 能快速确认它是否还活着。
+- 调用频率要克制：默认两次调用之间间隔 0.8 秒（`APS_TAOBAO_INTERVAL`），
+  瞬时错误自动退避重试，业务拒绝（如参数不合法）**不重试**。
+- 别拿它当免费 API 猛刷。`--max-detail` 就是为了控制调用量。
 
 ---
 
@@ -641,17 +729,21 @@ ai-product-selection/
 │   ├── service.py     # 业务编排
 │   ├── enrich.py      # 补齐接口缺失的维度（详情接口 / 大模型估算）
 │   └── sources/
-│       └── douyin.py  # 抖音精选联盟官方 API 客户端 + 字段映射
+│       ├── douyin.py  # 抖音精选联盟官方 API 客户端 + 字段映射
+│       └── taobao.py  # 淘宝官方 A2A 客户端 + 字段映射
 ├── data/
 │   ├── demo/          # 示例表格（GBK 的 CSV + xlsx）
 │   └── sample_products.json
 ├── scripts/
 │   ├── douyin_fetch.py
+│   ├── taobao_fetch.py
 │   ├── import_table.py
 │   ├── tune_weights.py
 │   └── seed_data.py
 ├── tests/
+│   ├── fixtures/      # 淘宝 A2A 真实响应切片
 │   ├── test_douyin.py
+│   ├── test_taobao.py
 │   ├── test_enrich.py
 │   ├── test_compare.py
 │   ├── test_tabular.py
@@ -676,7 +768,9 @@ pytest -q
 - [x] 让 LLM 判断 `heat` / `virality` / 类目名（`--enrich-judge`，按字段区分覆盖策略）
 - [x] 权重在线调参与 A/B 对比（快照 + Spearman + 维度影响力）
 - [x] 表格导入（CSV / Excel）：列名识别、单位换算、缺列推导、映射方案复用
+- [x] 淘宝官方 A2A 接口接入（真实售价 + 规格属性，绕开 CLI 内测门槛）
 - [ ] 1688 官方 API 采集器 —— **阻塞**：签名算法需官方文档或真实 appKey 才能核实（见上文）
+- [ ] 把 1688 供货价 × 淘宝售价接成真实毛利率闭环
 - [ ] 用真实转化率回测权重（目前只能比排序差异，还不能回答「哪套权重更赚钱」）
 - [ ] 选品结果导出为采购单 / 上架任务
 
