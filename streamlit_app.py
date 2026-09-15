@@ -182,6 +182,7 @@ def douyin_preview_frame(products: list[ProductIn]) -> pd.DataFrame:
             "合规风险": round(item.compliance_risk, 1),
             "需求热度": round(item.heat, 1),
             "竞争度": round(item.competition, 1),
+            "传播潜力": round(item.virality, 1),
             "数据说明": provenance,
             "链接": item.url,
         })
@@ -245,13 +246,23 @@ def page_douyin() -> None:
         with col6:
             use_llm = st.checkbox("启用大模型点评", value=False, disabled=not llm.is_available())
 
-        col7, col8 = st.columns([1, 2])
+        col7, col8 = st.columns(2)
         with col7:
             enrich_llm = st.checkbox(
                 "补齐重量/复购/合规", value=False, disabled=not llm.is_available(),
                 help="接口不返回这三个字段，用大模型按标题+类目估算。结果会写进数据说明。",
             )
+            enrich_judge = st.checkbox(
+                "让大模型判断热度/传播力/类目", value=False,
+                disabled=not llm.is_available(),
+                help="传播力原本只是佣金率代理，改由大模型判断；"
+                     "顺带把「抖音类目-2634」这类占位值换成可读类目名。",
+            )
         with col8:
+            override_heat = st.checkbox(
+                "允许覆盖接口热度", value=False, disabled=not llm.is_available(),
+                help="需求热度由接口的真实销量推导，默认不覆盖 —— 大模型判断通常不如销量可靠。",
+            )
             enrich_detail_limit = st.number_input(
                 "额外用商品详情接口补重量（仅自己店铺的商品有效，0=不试）",
                 0, 100, 0, step=5,
@@ -285,14 +296,16 @@ def page_douyin() -> None:
             return
 
         st.session_state.pop("douyin_enrich", None)
-        if products and (enrich_llm or enrich_detail_limit):
+        if products and (enrich_llm or enrich_judge or enrich_detail_limit):
             try:
                 with st.spinner("正在补齐重量 / 复购 / 合规…"):
                     products, enrich_report = enrich(
                         products,
                         client=source.client if enrich_detail_limit else None,
-                        use_llm=enrich_llm,
+                        use_llm=enrich_llm or enrich_judge,
                         detail_limit=int(enrich_detail_limit),
+                        judge=enrich_judge,
+                        override_heat=override_heat,
                     )
             except Exception as exc:  # noqa: BLE001 - 补齐失败不应弄丢已拉到的数据
                 st.warning(f"维度补齐失败，保留原始数据：{exc}")
@@ -353,7 +366,6 @@ def page_douyin() -> None:
             "「商家实收」= 售价 − 达人佣金；「佣金率」= 达人佣金 / 售价。"
             "这是分销带货视角的口径，自营请自行覆盖成本。右侧「数据说明」标明每个维度的实际来源。"
         )
-
     render_provenance()
     st.divider()
     st.caption(

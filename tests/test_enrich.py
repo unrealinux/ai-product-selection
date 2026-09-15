@@ -12,9 +12,14 @@ import pytest
 
 from app import enrich as enrich_mod
 from app.enrich import (
+    BASE_FIELDS,
+    JUDGE_FIELDS,
     PROVENANCE_SEP,
+    VALUE_POLICY,
     EstimateCache,
     EnrichReport,
+    _apply as apply_estimate,
+    build_system_prompt,
     describe_sources,
     enrich,
     estimate_with_llm,
@@ -463,3 +468,182 @@ def test_enrich_weight_only_from_detail_no_llm(no_llm):
 def test_enrich_empty_input():
     result, report = enrich([], use_llm=False)
     assert result == [] and report.filled == 0
+
+
+# --------------------------------------------------------------------------- #
+# 判断类字段（judge）：热度 / 传播力 / 类目
+# --------------------------------------------------------------------------- #
+
+def test_policy_table_reflects_data_quality():
+    """重量/复购/合规接口拿不到 → fill；传播力只有代理 → override；
+    热度有真实销量 → fill_only（默认不覆盖）。"""
+    assert VALUE_POLICY == {
+        "weight_kg": "fill",
+        "repurchase": "fill",
+        "compliance_risk": "fill",
+        "virality": "override",
+        "heat": "fill_only",
+    }
+    assert "heat" in JUDGE_FIELDS and "virality" in JUDGE_FIELDS
+    assert "heat" not in BASE_FIELDS
+
+
+def test_prompt_asks_only_for_requested_fields():
+    base = build_system_prompt(list(BASE_FIELDS))
+    assert "weight_kg" in base and "repurchase" in base and "compliance_risk" in base
+    assert "heat" not in base and "virality" not in base and "category_name" not in base
+
+    full = build_system_prompt([*BASE_FIELDS, *JUDGE_FIELDS, "category_name"])
+    for name in (*BASE_FIELDS, *JUDGE_FIELDS, "category_name"):
+        assert name in full
+    # JSON 示例里的字段应与请求一致
+    assert '"heat":60' in full and '"category_name":"咖啡冲调"' in full
+
+
+def test_prompt_tells_model_to_judge_independently():
+    assert "不要为了迎合输入里已有的数值而靠拢" in build_system_prompt(["heat"])
+
+
+def test_judge_overrides_virality_proxy(llm_available, monkeypatch, tmp_path):
+    """传播力原本是佣金率代理，judge 开启后应被大模型判断替代。"""
+    product = make_product(virality=100.0)  # 佣金率 30% → 代理值 100
+    _stub_chat(monkeypatch, {"items": [{"index": 0, "virality": 35}]})
+    report = EnrichReport()
+    sources: dict[int, dict[str, str]] = {}
+
+    result = estimate_with_llm(
+        [product], judge=True, report=report, sources=sources,
+        cache=EstimateCache(tmp_path / "c.json"),
+    )
+    assert result[0].virality == 35.0
+    assert "大模型判断" in sources[0]["virality"]
+    assert "原佣金率代理" in sources[0]["virality"]
+
+
+def test_judge_keeps_sales_derived_heat_by_default(llm_available, monkeypatch, tmp_path):
+    """热度来自接口真实销量，默认不许大模型覆盖。"""
+    product = make_product(heat=79.4)
+    _stub_chat(monkeypatch, {"items": [{"index": 0, "heat": 40, "virality": 35}]})
+    sources: dict[int, dict[str, str]] = {}
+
+    result = estimate_with_llm(
+        [product], judge=True, sources=sources, cache=EstimateCache(tmp_path / "c.json")
+    )
+    assert result[0].heat == 79.4, "销量映射出的热度不应被覆盖"
+    assert "heat" not in sources[0]
+
+
+def test_override_heat_allows_replacement(llm_available, monkeypatch, tmp_path):
+    product = make_product(heat=79.4)
+    _stub_chat(monkeypatch, {"items": [{"index": 0, "heat": 40}]})
+    sources: dict[int, dict[str, str]] = {}
+
+    result = estimate_with_llm(
+        [product], judge=True, override_heat=True, sources=sources,
+        cache=EstimateCache(tmp_path / "c.json"),
+    )
+    assert result[0].heat == 40.0
+    assert "大模型覆盖" in sources[0]["heat"]
+    assert "原销量映射" in sources[0]["heat"]
+
+
+def test_judge_fills_heat_when_api_value_is_zero(llm_available, monkeypatch, tmp_path):
+    """销量为 0 时热度无信息量，此时允许大模型填。"""
+    product = make_product(heat=0.0)
+    _stub_chat(monkeypatch, {"items": [{"index": 0, "heat": 55}]})
+    sources: dict[int, dict[str, str]] = {}
+
+    result = estimate_with_llm(
+        [product], judge=True, sources=sources, cache=EstimateCache(tmp_path / "c.json")
+    )
+    assert result[0].heat == 55.0
+    assert "接口值为 0" in sources[0]["heat"]
+
+
+def test_judge_replaces_placeholder_category(llm_available, monkeypatch, tmp_path):
+    """「抖音类目-2634」对人是无意义的，换成可读名称。"""
+    product = make_product(category="抖音类目-2634")
+    _stub_chat(monkeypatch, {"items": [{"index": 0, "category_name": "咖啡冲调"}]})
+    sources: dict[int, dict[str, str]] = {}
+
+    result = estimate_with_llm(
+        [product], judge=True, sources=sources, cache=EstimateCache(tmp_path / "c.json")
+    )
+    assert result[0].category == "咖啡冲调"
+    assert "大模型判断" in sources[0]["category"]
+
+
+def test_judge_keeps_meaningful_category(llm_available, monkeypatch, tmp_path):
+    """已经是有意义的类目名就不动它。"""
+    product = make_product(category="宠物用品")
+    _stub_chat(monkeypatch, {"items": [{"index": 0, "category_name": "猫玩具"}]})
+    result = estimate_with_llm(
+        [product], judge=True, cache=EstimateCache(tmp_path / "c.json")
+    )
+    assert result[0].category == "宠物用品"
+
+
+def test_category_name_is_sanitised():
+    product = make_product()
+    for bad in (None, "", "   ", "null", "Unknown", "未知"):
+        _, labels = apply_estimate(product, {"category_name": bad})
+        assert "category" not in labels, bad
+    _, labels = apply_estimate(product, {"category_name": "  咖啡冲调  "})
+    assert labels["category"].startswith("大模型判断")
+
+
+def test_judge_note_drops_virality_from_api_derived_list(llm_available, monkeypatch, tmp_path):
+    """传播力被大模型接管后，数据来源说明里不能再声称它来自接口。"""
+    _stub_chat(monkeypatch, {"items": [{"index": 0, "weight_kg": 0.4,
+                                        "virality": 35, "heat": 60}]})
+    result, _ = enrich(
+        [make_product()], use_llm=True, judge=True, override_heat=True,
+        cache=EstimateCache(tmp_path / "c.json"),
+    )
+    note = result[0].note
+    head = note.split(PROVENANCE_SEP, 1)[1].split("；", 1)[0]
+    assert "传播力" not in head, "传播力已被大模型接管，不应再声称来自接口"
+    assert "热度" not in head
+    assert "竞争度" in head and "毛利率" in head
+    assert "传播=大模型判断" in note and "热度=大模型覆盖" in note
+
+
+def test_cache_without_judge_fields_is_refetched(llm_available, monkeypatch, tmp_path):
+    """先跑一次不开启 judge 的缓存，开启 judge 后应重新请求。"""
+    calls = []
+    cache = EstimateCache(tmp_path / "c.json")
+
+    _stub_chat(monkeypatch, {"items": [{"index": 0, "weight_kg": 0.4}]}, recorder=calls)
+    estimate_with_llm([make_product()], cache=cache)
+    assert len(calls) == 1
+
+    _stub_chat(monkeypatch, {"items": [{"index": 0, "weight_kg": 0.4, "virality": 35}]},
+               recorder=calls)
+    report = EnrichReport()
+    result = estimate_with_llm([make_product()], judge=True, report=report, cache=cache)
+    assert len(calls) == 2, "缓存缺少判断类字段，应重新请求"
+    assert result[0].virality == 35.0
+    assert report.llm_cached == 0
+
+
+def test_apply_returns_no_labels_when_nothing_changes():
+    product = make_product()
+    updated, labels = apply_estimate(product, {"heat": 10})  # heat 有真实值，不覆盖
+    assert labels == {} and updated is product
+
+
+def test_enrich_judge_flag_is_passed_through(llm_available, monkeypatch, tmp_path):
+    """enrich(judge=True) 应把开关透传下去。"""
+    _stub_chat(monkeypatch, {"items": [{"index": 0, "weight_kg": 0.4, "virality": 30}]})
+    result, _ = enrich(
+        [make_product()], use_llm=True, judge=True,
+        cache=EstimateCache(tmp_path / "c.json"),
+    )
+    assert result[0].virality == 30.0
+
+    _stub_chat(monkeypatch, {"items": [{"index": 0, "weight_kg": 0.4, "virality": 30}]})
+    result2, _ = enrich(
+        [make_product()], use_llm=True, judge=False,
+        cache=EstimateCache(tmp_path / "c2.json"),
+    )
+    assert result2[0].virality == 100.0, "judge 关闭时应保留佣金率代理值"

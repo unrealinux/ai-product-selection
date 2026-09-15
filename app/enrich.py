@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
@@ -36,33 +37,91 @@ TARGET_FIELDS: dict[str, str] = {
     "weight_kg": "重量",
     "repurchase": "复购",
     "compliance_risk": "合规",
+    "heat": "热度",
+    "virality": "传播",
+    "category": "类目",
+}
+
+#: 由接口字段推导的维度 → 中文名（未被大模型接管时写进数据来源说明）
+API_FIELDS: dict[str, str] = {
+    "heat": "热度",
+    "competition": "竞争度",
+    "margin": "毛利率",
+    "virality": "传播力",
 }
 
 FIELD_LIMITS: dict[str, tuple[float, float]] = {
     "weight_kg": (0.01, 50.0),
     "repurchase": (0.0, 100.0),
     "compliance_risk": (0.0, 100.0),
+    "heat": (0.0, 100.0),
+    "virality": (0.0, 100.0),
 }
 
-LLM_SYSTEM_PROMPT = """你是跨境电商选品与供应链专家。用户会给出商品标题与类目，
-请估算三个无法从接口获得的字段：
+#: 接口完全拿不到的字段：一律用大模型填
+BASE_FIELDS: tuple[str, ...] = ("weight_kg", "repurchase", "compliance_risk")
+#: 「判断类」字段：接口只有代理指标，大模型介入才有意义
+JUDGE_FIELDS: tuple[str, ...] = ("heat", "virality")
 
-- weight_kg：单件商品（含常规包装）的运输重量，单位 kg，保留 2 位小数。
-  参考量级：手机壳 0.05、T 恤 0.25、保温杯 0.35、咖啡粉 30 条 0.4、
-  折叠椅 3.2、小型家电 1.5、智能垃圾桶 2.9。
-- repurchase：复购潜力 0-100。食品/日化/耗材偏高（60-90）；
-  家电/家具/耐用品偏低（5-25）。
-- compliance_risk：合规风险 0-100。涉及医疗器械、儿童玩具、化妆品、
-  保健或疗效宣称、锂电池运输的偏高（40-80）；普通日用百货偏低（5-20）。
+FIELD_SPECS: dict[str, str] = {
+    "weight_kg": (
+        "- weight_kg：单件商品（含常规包装）的运输重量，单位 kg，保留 2 位小数。\n"
+        "  参考量级：手机壳 0.05、T 恤 0.25、保温杯 0.35、咖啡粉 30 条 0.4、\n"
+        "  折叠椅 3.2、小型家电 1.5、智能垃圾桶 2.9。"
+    ),
+    "repurchase": (
+        "- repurchase：复购潜力 0-100。食品/日化/耗材偏高（60-90）；\n"
+        "  家电/家具/耐用品偏低（5-25）。"
+    ),
+    "compliance_risk": (
+        "- compliance_risk：合规风险 0-100。涉及医疗器械、儿童玩具、化妆品、\n"
+        "  保健或疗效宣称、锂电池运输的偏高（40-80）；普通日用百货偏低（5-20）。"
+    ),
+    "heat": (
+        "- heat：需求热度 0-100。属于**品类**层面的判断，不是单个商品的销量。\n"
+        "  刚需高频（纸品、清洁、粮油）70-85；季节性/尝鲜型（新奇小家电）50-70；\n"
+        "  小众垂类（专业器材、收藏品）20-40。"
+    ),
+    "virality": (
+        "- virality：内容传播力 0-100。指该商品在短视频里做演示/测评的天然效果。\n"
+        "  有视觉冲击或前后对比的偏高（清洁神器、宠物玩具 80-95）；\n"
+        "  无形或平淡的偏低（数据线、保鲜袋 25-45）。"
+    ),
+    "category_name": (
+        "- category_name：6 个汉字以内的中文类目名（如「咖啡冲调」「宠物玩具」），\n"
+        "  必须比原始类目 ID 更有信息量。"
+    ),
+}
 
-只输出 JSON，不要 markdown 代码块，不要解释。格式：
-{"items":[{"index":0,"weight_kg":0.35,"repurchase":25,"compliance_risk":15,
-"reason":"保温杯属耐用品复购低，需食品接触材料报告"}]}
 
-硬性要求：
-1. index 必须与输入编号一致；
-2. 三个字段都必须给出具体数值，不要返回 null；
-3. reason 不超过 40 字，说明主要判断依据。"""
+def build_system_prompt(fields: Sequence[str]) -> str:
+    """按需生成系统提示词 —— 未开启判断类字段时不多问，省 token。"""
+    specs = [FIELD_SPECS[name] for name in fields if name in FIELD_SPECS]
+    example: list[str] = ['"index":0']
+    for name in fields:
+        if name == "category_name":
+            example.append('"category_name":"咖啡冲调"')
+        elif name == "weight_kg":
+            example.append('"weight_kg":0.4')
+        else:
+            example.append(f'"{name}":60')
+    example.append('"reason":"判断依据，40 字以内"')
+    body = "{" + ",".join(example) + "}"
+
+    return (
+        "你是跨境电商选品与供应链专家。用户会给出商品标题与类目，请估算以下字段：\n\n"
+        + "\n".join(specs)
+        + f'\n\n只输出 JSON，不要 markdown 代码块，不要解释。格式：\n{{"items":[{body}]}}'
+        + "\n\n硬性要求：\n"
+        "1. index 必须与输入编号一致；\n"
+        "2. 每个字段都必须给出具体数值，不要返回 null；\n"
+        "3. reason 不超过 40 字，说明主要判断依据；\n"
+        "4. 独立判断，不要为了迎合输入里已有的数值而靠拢。"
+    )
+
+
+#: 已废弃的固定提示词，保留供旧调用方引用
+LLM_SYSTEM_PROMPT = build_system_prompt([*BASE_FIELDS])
 
 
 @dataclass
@@ -186,10 +245,12 @@ def note_body(note: str) -> str:
 
 def describe_sources(sources: Mapping[str, str]) -> str:
     """生成 note 尾部的数据来源说明。"""
+    from_api = [label for key, label in API_FIELDS.items() if key not in sources]
+    head = ("、".join(from_api) + "由接口字段推导") if from_api else "无接口推导维度"
     if not sources:
-        return "热度/竞争度/毛利率/传播力由接口字段推导；重量、复购、合规为缺省值，需人工复核"
-    bits = [f"{TARGET_FIELDS.get(k, k)}={v}" for k, v in sources.items()]
-    return "热度/竞争度/毛利率由接口字段推导；" + "、".join(bits)
+        return f"{head}；重量、复购、合规为缺省值，需人工复核"
+    bits = [f"{TARGET_FIELDS.get(key, key)}={value}" for key, value in sources.items()]
+    return f"{head}；" + "、".join(bits)
 
 
 def with_sources(note: str, sources: Mapping[str, str]) -> str:
@@ -287,7 +348,33 @@ def _build_user_prompt(batch: Sequence[ProductIn]) -> str:
     return "\n".join(lines)
 
 
-def _parse_estimates(payload: Any, size: int) -> dict[int, dict[str, float]]:
+#: 每个字段的落库策略
+#: fill       —— 接口没有这个数据，直接填
+#: fill_only  —— 接口有更可靠的硬数据（如销量），只在缺失时填
+#: override   —— 接口只有代理指标，默认用大模型判断替代
+VALUE_POLICY: dict[str, str] = {
+    "weight_kg": "fill",
+    "repurchase": "fill",
+    "compliance_risk": "fill",
+    "virality": "override",
+    "heat": "fill_only",
+}
+
+#: 形如「抖音类目-2634」的占位类目，才允许被大模型给出的名称替换
+PLACEHOLDER_CATEGORY = re.compile(r"^(抖音类目-\d+|未分类)?$")
+
+
+def _clean_category_name(value: Any) -> Optional[str]:
+    """清洗模型给出的类目名。"""
+    if value is None:
+        return None
+    text = str(value).strip().replace("\n", " ")[:32]
+    if not text or text.lower() in {"null", "none", "unknown", "未知"}:
+        return None
+    return text
+
+
+def _parse_estimates(payload: Any, size: int) -> dict[int, dict[str, Any]]:
     """把模型返回解析为 {index: {field: value}}。"""
     items: Any = payload
     if isinstance(payload, Mapping):
@@ -295,7 +382,7 @@ def _parse_estimates(payload: Any, size: int) -> dict[int, dict[str, float]]:
     if not isinstance(items, list):
         return {}
 
-    parsed: dict[int, dict[str, float]] = {}
+    parsed: dict[int, dict[str, Any]] = {}
     for entry in items:
         if not isinstance(entry, Mapping):
             continue
@@ -305,16 +392,73 @@ def _parse_estimates(payload: Any, size: int) -> dict[int, dict[str, float]]:
             continue
         if not 0 <= index < size:
             continue
-        values: dict[str, float] = {}
+        values: dict[str, Any] = {}
         for name, (low, high) in FIELD_LIMITS.items():
             number = _coerce(entry.get(name), low, high)
             if number is not None:
                 values[name] = number
-        if values.get("weight_kg") is not None:
-            values.setdefault("weight_kg", 0.0)
+        category = _clean_category_name(entry.get("category_name"))
+        if category:
+            values["category_name"] = category
         if values:
             parsed[index] = values
     return parsed
+
+
+def _apply(
+    product: ProductIn,
+    values: Mapping[str, Any],
+    *,
+    allowed: Optional[set[str]] = None,
+    override_heat: bool = False,
+) -> tuple[ProductIn, dict[str, str]]:
+    """按字段策略把估算值写回商品。
+
+    Args:
+        allowed: 本次实际请求过的字段集合。**只会应用集合内的字段** ——
+            避免模型多吐了未开启的字段（如未开 judge 却返回 virality）就被采纳。
+            ``None`` 表示不限制。
+
+    Returns:
+        ``(新商品, {字段: 来源标签})``；无任何变更时标签为空字典。
+    """
+    updates: dict[str, Any] = {}
+    labels: dict[str, str] = {}
+
+    for field in ("weight_kg", "repurchase", "compliance_risk", "virality", "heat"):
+        if field not in values:
+            continue
+        if allowed is not None and field not in allowed:
+            continue  # 本次没问这个字段，即使模型返回了也不采纳
+        policy = VALUE_POLICY[field]
+        if field == "heat" and override_heat:
+            policy = "override"
+        current = getattr(product, field, 0.0) or 0.0
+
+        if policy == "override":
+            if field == "heat":
+                labels[field] = f"大模型覆盖（原销量映射 {current:.0f}）"
+            else:
+                labels[field] = f"大模型判断（原佣金率代理 {current:.0f}）"
+            updates[field] = values[field]
+        elif policy == "fill_only":
+            if current > 0:
+                continue  # 接口有硬数据，不覆盖
+            labels[field] = "大模型估算（接口值为 0）"
+            updates[field] = values[field]
+        else:  # fill
+            labels[field] = "大模型估算"
+            updates[field] = values[field]
+
+    if allowed is None or "category_name" in allowed:
+        name = _clean_category_name(values.get("category_name"))
+        if name and PLACEHOLDER_CATEGORY.match(product.category or ""):
+            updates["category"] = name
+            labels["category"] = f"大模型判断（原 {product.category or '空'}）"
+
+    if not updates:
+        return product, {}
+    return product.model_copy(update=updates), labels
 
 
 def estimate_with_llm(
@@ -324,8 +468,18 @@ def estimate_with_llm(
     cache: Optional[EstimateCache] = None,
     report: Optional[EnrichReport] = None,
     sources: Optional[dict[int, dict[str, str]]] = None,
+    judge: bool = False,
+    override_heat: bool = False,
 ) -> list[ProductIn]:
-    """用大模型估算 ``weight_kg`` / ``repurchase`` / ``compliance_risk``。
+    """用大模型估算接口拿不到、或只有弱代理指标的维度。
+
+    Args:
+        judge: 是否让大模型接管「判断类」字段。开启后：
+            ``virality`` 用大模型判断替代佣金率代理；
+            ``heat`` 只在接口推导值为 0 时填充（除非 ``override_heat=True``）；
+            并顺带给出可读中文类目名，替换「抖音类目-2634」这类占位值。
+        override_heat: 是否允许大模型**覆盖**由销量推导出的需求热度。
+            默认关闭——接口的 ``sales`` 是硬数据，大模型判断通常不如它可靠。
 
     未配置 LLM 或调用失败时原样返回，不影响主流程。
     """
@@ -336,8 +490,14 @@ def estimate_with_llm(
     if not items:
         return items
     if not llm.is_available():
-        report.notes.append("未配置 APS_LLM_* ，跳过重量/复购/合规的估算，保持缺省值。")
+        report.notes.append("未配置 APS_LLM_* ，跳过维度估算，保持接口值或缺省值。")
         return items
+
+    fields: list[str] = list(BASE_FIELDS)
+    if judge:
+        fields.extend(JUDGE_FIELDS)
+        fields.append("category_name")
+    system_prompt = build_system_prompt(fields)
 
     batch_size = batch_size or settings.enrich_batch_size
     batch_size = max(1, min(int(batch_size), 20))
@@ -346,24 +506,30 @@ def estimate_with_llm(
     pending: list[int] = []
     for index, item in enumerate(items):
         cached = cache.get(item)
-        if cached:
-            report.llm_cached += 1
-            values = _parse_estimates({"items": [dict(cached, index=0)]}, 1).get(0, {})
-            if values:
-                items[index] = _apply(item, values)
-                sources.setdefault(index, {})["weight_kg"] = "大模型估算"
-                sources[index]["repurchase"] = "大模型估算"
-                sources[index]["compliance_risk"] = "大模型估算"
-                report.llm_filled += 1
+        if cached and judge and not set(JUDGE_FIELDS).issubset(cached):
+            cached = None  # 缓存来自未开启判断的旧运行，重新问
+        if not cached:
+            pending.append(index)
             continue
-        pending.append(index)
+
+        report.llm_cached += 1
+        values = _parse_estimates({"items": [dict(cached, index=0)]}, 1).get(0, {})
+        if not values:
+            continue
+        updated, labels = _apply(
+            item, values, allowed=set(fields), override_heat=override_heat
+        )
+        if labels:
+            items[index] = updated
+            sources.setdefault(index, {}).update(labels)
+            report.llm_filled += 1
 
     for start in range(0, len(pending), batch_size):
         chunk = pending[start:start + batch_size]
         batch = [items[i] for i in chunk]
         content = llm.chat(
             [
-                {"role": "system", "content": LLM_SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": _build_user_prompt(batch)},
             ],
             temperature=0.2,
@@ -382,25 +548,23 @@ def estimate_with_llm(
 
         for offset, values in parsed.items():
             index = chunk[offset]
-            items[index] = _apply(items[index], values)
-            field_sources = sources.setdefault(index, {})
-            for name in values:
-                field_sources[name] = "大模型估算"
-            report.llm_filled += 1
+            updated, labels = _apply(
+                items[index], values, allowed=set(fields), override_heat=override_heat
+            )
+            if labels:
+                items[index] = updated
+                sources.setdefault(index, {}).update(labels)
+                report.llm_filled += 1
             cache.put(items[index], {"index": 0, **values})
 
     cache.save()
     if report.llm_filled:
+        extra = "热度/传播力/类目为大模型判断值；" if judge else ""
         report.notes.append(
-            "重量/复购/合规为**大模型估算值**，非接口数据，已写入 note 的数据来源说明。"
+            "重量/复购/合规为大模型估算值；" + extra
+            + "均为估算，非接口数据，已写入 note 的数据来源说明。"
         )
     return items
-
-
-def _apply(product: ProductIn, values: Mapping[str, float]) -> ProductIn:
-    """把估算值写回商品（只覆盖确实返回了的字段）。"""
-    updates = {name: value for name, value in values.items() if name in FIELD_LIMITS}
-    return product.model_copy(update=updates) if updates else product
 
 
 # --------------------------------------------------------------------------- #
@@ -416,14 +580,18 @@ def enrich(
     batch_size: Optional[int] = None,
     cache: Optional[EstimateCache] = None,
     use_cache: bool = True,
+    judge: bool = False,
+    override_heat: bool = False,
 ) -> tuple[list[ProductIn], EnrichReport]:
-    """按优先级补齐重量 / 复购 / 合规，并重写 note 里的数据来源说明。
+    """按优先级补齐维度，并重写 note 里的数据来源说明。
 
     Args:
         client: 传入 ``DouyinClient`` 才会尝试走商品详情接口（仅自己店铺商品有效）。
         use_llm: 是否用大模型估算。
         detail_limit: 商品详情接口最多尝试多少个商品；``0`` 表示全部。
         use_cache: 是否使用估算结果缓存。
+        judge: 让大模型接管传播力/类目，并在热度为 0 时填充热度。
+        override_heat: 允许大模型覆盖接口由销量推导出的需求热度（默认关闭）。
 
     Returns:
         ``(补齐后的商品列表, 明细报告)``
@@ -444,6 +612,8 @@ def enrich(
             cache=cache if cache is not None else EstimateCache(enabled=use_cache),
             report=report,
             sources=sources,
+            judge=judge,
+            override_heat=override_heat,
         )
 
     enriched = [
