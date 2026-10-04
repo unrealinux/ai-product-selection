@@ -35,6 +35,8 @@ from app import db, service  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.costlink import (  # noqa: E402
     DEFAULT_THRESHOLD,
+    IMAGE_STRONG,
+    IMAGE_WEAK,
     apply_matches,
     link_costs,
     margin_report,
@@ -68,6 +70,14 @@ def parse_args() -> argparse.Namespace:
                         help="连同低置信候选一起写入（不建议）")
     parser.add_argument("--review", action="store_true",
                         help="用大模型复核低置信候选（消耗 token；通过的会升级为高置信）")
+    parser.add_argument("--images", action="store_true",
+                        help="用主图相似度复核低置信候选（无需 LLM，但会下载图片）")
+    parser.add_argument("--image-strong", type=float, default=IMAGE_STRONG,
+                        help=f"主图相似度 ≥ 此值视为同一款（默认 {IMAGE_STRONG}）")
+    parser.add_argument("--image-weak", type=float, default=IMAGE_WEAK,
+                        help=f"主图相似度 ≤ 此值视为不同款（默认 {IMAGE_WEAK}）")
+    parser.add_argument("--no-image-cache", action="store_true",
+                        help="不复用主图哈希缓存（默认缓存到 data/cache/image_hashes.json）")
     parser.add_argument("--review-min-confidence", type=int, default=0,
                         help="模型自评置信度门槛，低于它保持低置信（默认取 APS_MATCH_REVIEW_MIN_CONFIDENCE）")
     parser.add_argument("--review-no-cache", action="store_true",
@@ -156,6 +166,35 @@ def main() -> int:
     print(f"\n{result.summary()}")
     for warning in result.warnings:
         print(f"  ⚠️  {warning}")
+
+    if args.images:
+        from app.costlink import apply_image_signals
+        from app.imagehash import ImageHashCache, is_available
+
+        if not is_available():
+            print("\n未安装 Pillow，跳过主图复核。安装：pip install pillow")
+        else:
+            print("\n正在比对主图…")
+            image_report = apply_image_signals(
+                result,
+                strong=args.image_strong,
+                weak=args.image_weak,
+                cache=ImageHashCache(enabled=not args.no_image_cache),
+            )
+            print(f"  主图复核：{image_report.summary()}")
+            for message in image_report.notes:
+                print(f"  ℹ️  {message}")
+            if image_report.promoted:
+                print(f"\n主图复核通过（已升级为高置信，{image_report.promoted} 条）：")
+                for match in result.accepted:
+                    if match.method == "image":
+                        print(f"  {match.score:.3f}  主图 {match.image_score:.3f}  "
+                              f"{match.target.title[:24]} ← {match.supply_title[:24]}")
+            if image_report.rejected:
+                print(f"\n主图复核否决（判定不同款，{image_report.rejected} 条，不会写入）：")
+                for match in result.rejected:
+                    print(f"  {match.score:.3f}  主图 {match.image_score if match.image_score is not None else 0:.3f}  "
+                          f"{match.target.title[:24]} ← {match.supply_title[:24]}")
 
     if args.review:
         from app.match_review import ReviewCache

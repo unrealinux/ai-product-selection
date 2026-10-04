@@ -40,6 +40,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 from ..config import settings
 from ..crawler import Source
 from ..enrich import PROVENANCE_SEP
+from ..imagehash import normalize_image_url
 from ..models import ProductIn
 from ..scoring import clamp
 
@@ -460,6 +461,7 @@ def to_product(
         cost=0.0,  # 淘宝是零售价，成本需另有来源（1688 供货价 / 表格导入）
         source=source,
         url=str(product.get("url") or product.get("auctionURL") or "")[:500],
+        image_url=normalize_image_url(product.get("picPath") or product.get("picUrl")),
         heat=heat,
         competition=50.0,
         weight_kg=weight if weight else 0.5,

@@ -423,6 +423,7 @@ Streamlit 的 **📄 表格导入** 页签有同样的流程：上传 → 逐字
 | 销量 | 30天成交、成交笔数、历史销量、sold_count、sales |
 | 重量 | 重量(g)、毛重、净重、weight_kg、gross_weight |
 | 复购 | 复购率、回头率、repurchase_rate |
+| 主图链接 | 主图、商品主图、图片、主图地址、image_url、img、pic_url |
 
 识别不准时用 `--map` 手工指定（左边可用英文字段名或中文名）：
 
@@ -555,6 +556,46 @@ python scripts/link_costs.py --explain "304不锈钢保温杯 500ml|316L保温�
 ```
 
 Streamlit 的 **🔗 成本对齐** 页签有同样的流程：参数 → 预览 → 写入。
+
+### 主图相似度：不用 LLM 的第二个信号
+
+标题相似度对「外形不同」是盲的 —— 同一个标题措辞可以对应完全不同的商品。
+主图是最直接的证据，而且**不需要花 token**：
+
+- 淘宝 ``item-detail`` / ``item-search`` 都返回 ``picPath``（已实测，代码自动取并补全协议）
+- 1688 / 分销后台导出表里的「主图链接」列现在会被自动识别
+
+```bash
+# 两侧都有图时用 dHash 比对
+python scripts/link_costs.py --images --preview
+python scripts/link_costs.py --images --review --apply   # 主图先跑，剩余灰区再交给大模型
+
+# 调阈值
+python scripts/link_costs.py --images --image-strong 0.85 --image-weak 0.30 --preview
+```
+
+| 主图相似度 | 处理 |
+| --- | --- |
+| ≥ 0.80（`--image-strong`） | **升级为高置信**，可正常写入；`note` 写明「低置信经主图复核通过（主图相似度 0.930）」 |
+| ≤ 0.35（`--image-weak`） | 标记为 `rejected`，**任何标志下都不写入** |
+| 中间区间 | 只记录 `image_score`，**保持低置信**（交给人工或大模型） |
+
+为什么用 **dHash（差分感知哈希）**：它只关心相邻像素的明暗关系，所以缩略图、
+加水印、轻微裁剪都还能对上，而不同商品通常差异很大（实测量级：同图 1.0，
+完全互补 0.0）。
+
+| 设计 | 理由 |
+| --- | --- |
+| **算不出来 ≠ 不相似** | 缺图 / 下载失败 / 解码失败 / 未装 Pillow 一律返回 `None` 并**保持原样**；返回 0 会把缺图商品静默判错 |
+| 只复核灰区 | 与 LLM 复核一致；高置信匹配不重复验证 |
+| 哈希按 URL 缓存 | 同一图片只下载一次（`APS_IMAGE_CACHE`，默认 `data/cache/image_hashes.json`） |
+| Pillow 为可选依赖 | 未安装时 `is_available()` 返回 False，整个图片链路自动跳过，不影响其他功能 |
+| 与大模型复核分工 | 主图先跑（免费、确定），剩下的不确定性再花 token |
+
+> 阈值给得保守是有意的：同款不同色、不同角度可能被压到较低分，
+> 所以中间区间不自动下结论，只把分数露出来给人看。
+
+相关环境变量：`APS_IMAGE_CACHE`、`APS_IMAGE_TIMEOUT`。
 
 ### 低置信候选：让大模型复核
 
@@ -956,6 +997,7 @@ ai-product-selection/
 │   ├── tabular.py     # 表格导入：列名识别 / 单位换算 / 缺列推导
 │   ├── costlink.py    # 成本对齐：标题相似度匹配 + 负毛利诊断
 │   ├── match_review.py # 低置信匹配的大模型复核（灰区判定 + 缓存）
+│   ├── imagehash.py   # 主图 dHash 感知哈希 + URL 缓存（Pillow 可选）
 │   ├── service.py     # 业务编排
 │   ├── enrich.py      # 补齐接口缺失的维度（详情接口 / 大模型估算）
 │   └── sources/
@@ -987,6 +1029,8 @@ ai-product-selection/
 │   ├── test_api.py
 │   ├── test_outcomes.py
 │   ├── test_match_review.py
+│   ├── test_imagehash.py
+│   ├── test_image_review.py
 │   └── test_streamlit.py
 ├── streamlit_app.py
 ├── conftest.py
@@ -1021,7 +1065,8 @@ CI（`.github/workflows/ci.yml`）在 Python 3.10 / 3.12 / 3.13 上跑这两步�
 - [x] 用真实转化率回测权重（`product_outcomes` + Spearman + Top/其余倍差）
 - [ ] 随机分组 A/B，把回测从**相关性**推进到**因果**（当前结论不能当「提升了 x% 利润」的证据）
 - [x] 匹配提质：低置信候选走大模型复核（`scripts/link_costs.py --review`，置信不足时保持低置信）
-- [ ] 匹配提质：图片相似度（淘宝 `item-detail` 有图；1688 表里若带主图链接即可做感知哈希）
+- [x] 匹配提质：主图相似度（dHash）复核，无需 LLM；缺图/下载失败时保持原样不降级
+- [ ] 匹配提质：把主图信号也用于**高置信**匹配的二次校验（现在是只复核灰区）
 - [ ] 选品结果导出为采购单 / 上架任务
 
 ## License

@@ -14,6 +14,7 @@ import streamlit as st
 from app import __version__, crawler, db, llm, outcomes, service
 from app.config import DIMENSION_LABELS, settings
 from app.enrich import PROVENANCE_SEP, enrich
+from app.imagehash import normalize_image_url
 from app.models import ProductIn
 from app.sources.douyin import (
     FIELD_PROVENANCE,
@@ -706,6 +707,12 @@ def page_costlink() -> None:
             "所以下面先预览、确认后再写入，低置信候选默认不应用。"
         )
 
+    use_images = st.checkbox(
+        "用主图相似度复核低置信候选",
+        value=False,
+        help="两侧都有主图时用 dHash 比对（无需 LLM）：主图明显不同→判为不同款，"
+             "明显相同→升级为高置信。会下载图片；哈希缓存到 data/cache/image_hashes.json。",
+    )
     use_review = st.checkbox(
         "用大模型复核低置信候选",
         value=False,
@@ -716,8 +723,12 @@ def page_costlink() -> None:
         st.caption("⚠️ 未配置 APS_LLM_*，复核不可用；低置信候选会保持原样。")
 
     if st.button("预览匹配结果", type="primary"):
-        spinner = "正在匹配…" + ("，并用大模型复核低置信候选…" if use_review else "")
-        with st.spinner(spinner):
+        steps = ["正在匹配…"]
+        if use_images:
+            steps.append("比对主图…")
+        if use_review:
+            steps.append("大模型复核低置信候选…")
+        with st.spinner("，".join(steps)):
             result = link_costs(
                 products,
                 target_source="" if target_source.startswith("（") else target_source,
@@ -726,6 +737,18 @@ def page_costlink() -> None:
                 min_shared_specs=int(min_specs),
                 dry_run=True,
             )
+            if use_images:
+                from app.costlink import apply_image_signals
+                from app.imagehash import is_available as images_available
+
+                if images_available():
+                    st.session_state["costlink_images"] = apply_image_signals(result)
+                else:
+                    st.session_state.pop("costlink_images", None)
+                    st.warning("未安装 Pillow，已跳过主图复核。`pip install pillow`")
+            else:
+                st.session_state.pop("costlink_images", None)
+
             if use_review and llm.is_available():
                 from app.match_review import review_matches
 
@@ -742,6 +765,11 @@ def page_costlink() -> None:
 
     st.divider()
     st.markdown(f"**{result.summary()}**")
+    image_report = st.session_state.get("costlink_images")
+    if image_report is not None:
+        st.info(f"主图复核：{image_report.summary()}")
+        for message in image_report.notes:
+            st.caption(f"ℹ️ {message}")
     review_report = st.session_state.get("costlink_review")
     if review_report is not None:
         st.info(f"大模型复核：{review_report.summary()}")
@@ -758,7 +786,9 @@ def page_costlink() -> None:
             pd.DataFrame([
                 {"相似度": m.score, "售价": m.target.price, "成本": m.cost,
                  "毛利率": f"{m.margin:.1%}", "共同规格": "/".join(m.shared_specs),
-                 "复核": (f"LLM 通过 {m.review_confidence}" if m.method == "llm_review" else ""),
+                 "主图": (f"{m.image_score:.3f}" if m.image_score is not None else ""),
+                 "复核": (f"LLM 通过 {m.review_confidence}" if m.method == "llm_review"
+                          else ("主图通过" if m.method == "image" else "")),
                  "淘宝商品": m.target.title, "← 供货来源": m.supply_title}
                 for m in sorted(result.accepted, key=lambda x: -x.score)
             ]),
@@ -770,12 +800,16 @@ def page_costlink() -> None:
         )
 
     if result.rejected:
-        with st.expander(f"大模型判定「非同款」（{len(result.rejected)} 条，不会写入）",
+        with st.expander(f"复核判定「非同款」（{len(result.rejected)} 条，不会写入）",
                          expanded=True):
-            st.caption("模型认为这些候选与零售商品不是同一款货（规格/形态/套装数不同）。")
+            st.caption("主图明显不同或大模型认为不是同一款货（规格/形态/套装数不同）。")
             st.dataframe(
                 pd.DataFrame([
-                    {"相似度": m.score, "置信": m.review_confidence, "理由": m.review_reason,
+                    {"相似度": m.score,
+                     "主图": (f"{m.image_score:.3f}" if m.image_score is not None else ""),
+                     "判定": m.method,
+                     "置信": m.review_confidence,
+                     "理由": m.review_reason,
                      "淘宝商品": m.target.title, "← 供货来源": m.supply_title}
                     for m in result.rejected
                 ]),
@@ -832,6 +866,8 @@ def page_create() -> None:
             category = st.text_input("类目", value="未分类")
             source = st.text_input("来源", value="manual")
             url = st.text_input("商品链接", value="")
+            image_url = st.text_input("主图链接", value="",
+                                      help="用于成本对齐的主图复核，可留空。")
         with col2:
             price = st.number_input("售价（元）", min_value=0.0, value=99.0, step=1.0)
             cost = st.number_input("成本（元）", min_value=0.0, value=35.0, step=1.0)
@@ -857,6 +893,7 @@ def page_create() -> None:
         product = db.upsert_product(ProductIn(
             title=title, category=category or "未分类", price=price, cost=cost,
             source=source or "manual", url=url, heat=heat, competition=competition,
+            image_url=normalize_image_url(image_url),
             weight_kg=weight_kg, repurchase=repurchase, compliance_risk=compliance_risk,
             virality=virality, note=note,
         ))

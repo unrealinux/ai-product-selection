@@ -20,6 +20,7 @@ class ProductIn(BaseModel):
     cost: float = Field(0.0, ge=0, description="成本（元）")
     source: str = Field("manual", max_length=32, description="来源渠道")
     url: str = Field("", max_length=500, description="商品链接")
+    image_url: str = Field("", max_length=500, description="商品主图 URL（用于图片相似度复核）")
     heat: float = Field(50.0, ge=0, le=100, description="需求热度 0-100")
     competition: float = Field(50.0, ge=0, le=100, description="竞争度 0-100，越低越好")
     weight_kg: float = Field(0.5, ge=0, le=50, description="单件重量（kg）")

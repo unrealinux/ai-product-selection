@@ -380,6 +380,29 @@ def test_build_products_clamps_cost_above_price():
     assert product.cost == pytest.approx(10.0), "成本高于售价时封顶，避免负毛利"
 
 
+def test_image_column_is_mapped_and_url_normalised():
+    """1688 导出表的主图链接通常是协议相对地址（//img...），要补上 https。"""
+    table = TableData(
+        columns=["商品标题", "批发价(元)", "主图链接"],
+        rows=[{"商品标题": "304不锈钢保温杯", "批发价(元)": "18.5",
+               "主图链接": "//img.alicdn.com/bao/a.jpg"}],
+    )
+    mapping = ColumnMapping.auto(table.columns)
+
+    assert mapping.fields.get("image_url") == "主图链接"
+    product = build_products(table, mapping).products[0]
+    assert product.image_url == "https://img.alicdn.com/bao/a.jpg"
+
+
+def test_image_column_placeholders_become_empty():
+    table = TableData(
+        columns=["商品标题", "售价", "主图"],
+        rows=[{"商品标题": "甲", "售价": "10", "主图": "无"}],
+    )
+    product = build_products(table, ColumnMapping.auto(table.columns)).products[0]
+    assert product.image_url == ""
+
+
 def test_build_products_fen_price_unit():
     table = TableData(
         columns=["商品标题", "售价(分)"],

@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from .crawler import Source
+from .imagehash import normalize_image_url
 from .models import ProductIn
 from .scoring import clamp, log_scale
 
@@ -52,6 +53,11 @@ FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "url": (
         "商品链接", "详情链接", "商品url", "链接", "地址",
         "detail_url", "product_url", "url", "link",
+    ),
+    "image_url": (
+        "主图", "主图链接", "商品主图", "商品图片", "图片", "图片链接", "主图地址",
+        "image_url", "imageurl", "main_image", "mainimage", "image", "img",
+        "pic_url", "picurl", "picture", "photo",
     ),
     "price": (
         "售价", "零售价", "销售价", "建议售价", "终端价", "对外价",
@@ -139,6 +145,7 @@ FIELD_LABELS: dict[str, str] = {
     "external_id": "商品编号",
     "category": "类目",
     "url": "商品链接",
+    "image_url": "主图链接",
     "price": "售价",
     "cost": "成本",
     "sales": "销量",
@@ -735,6 +742,7 @@ def build_products(data: TableData, mapping: ColumnMapping) -> BuildResult:
                 cost=round(cost, 2),
                 source=mapping.source,
                 url=str(value("url") or "").strip()[:500],
+                image_url=normalize_image_url(value("image_url")),
                 heat=heat,
                 competition=rate("competition", 50.0),
                 weight_kg=round(weight, 4) if weight > 0 else 0.5,

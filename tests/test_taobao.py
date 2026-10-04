@@ -374,6 +374,18 @@ def test_to_product_flags_search_price_when_detail_missing():
     assert "来自搜索页" in product.note
 
 
+def test_to_product_extracts_main_image_from_pic_path():
+    """实测响应带 picPath（协议相对地址），用于成本对齐的主图复核。"""
+    product = to_product(fixture_search_products()[0], fixture_detail_item(),
+                         query="保温杯", rank=1, window=50)
+    assert product.image_url.startswith("https://img.alicdn.com/")
+
+
+def test_to_product_without_image_leaves_it_empty():
+    product = to_product(make_search_item("123"), make_detail("123"), query="x")
+    assert product.image_url == ""
+
+
 def test_to_product_coerces_string_price():
     """接口返回的 price 是字符串。"""
     assert isinstance(fixture_search_products()[0]["price"], str)

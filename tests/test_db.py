@@ -83,6 +83,7 @@ def test_migration_backfills_missing_column_without_data_loss(tmp_path):
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(products)")}
         count = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
     assert "external_id" in columns
+    assert "image_url" in columns
     assert count == 1
 
 
@@ -137,6 +138,13 @@ def test_bulk_upsert_returns_saved_records(temp_db):
     saved = db.bulk_upsert([make_product("A"), make_product("B")], temp_db)
     assert [p.title for p in saved] == ["A", "B"]
     assert all(p.id for p in saved)
+
+
+def test_image_url_round_trips(temp_db):
+    saved = db.upsert_product(
+        make_product("A", image_url="https://img.alicdn.com/a.jpg"), temp_db
+    )
+    assert db.get_product(saved.id, temp_db).image_url == "https://img.alicdn.com/a.jpg"
 
 
 # --------------------------------------------------------------------------- #

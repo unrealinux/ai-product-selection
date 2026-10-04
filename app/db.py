@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS products (
     cost            REAL    NOT NULL DEFAULT 0,
     source          TEXT    NOT NULL DEFAULT 'manual',
     url             TEXT    NOT NULL DEFAULT '',
+    image_url       TEXT    NOT NULL DEFAULT '',
     heat            REAL    NOT NULL DEFAULT 50,
     competition     REAL    NOT NULL DEFAULT 50,
     weight_kg       REAL    NOT NULL DEFAULT 0.5,
@@ -137,7 +138,7 @@ CREATE INDEX IF NOT EXISTS idx_decisions_run     ON decisions(run_id);
 """
 
 PRODUCT_FIELDS = (
-    "title", "external_id", "category", "price", "cost", "source", "url",
+    "title", "external_id", "category", "price", "cost", "source", "url", "image_url",
     "heat", "competition", "weight_kg", "repurchase",
     "compliance_risk", "virality", "note",
 )
@@ -145,6 +146,7 @@ PRODUCT_FIELDS = (
 #: 建表后新增的列（列名, ALTER TABLE 片段）。旧库启动时自动补列，避免手动迁移
 COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("external_id", "external_id TEXT NOT NULL DEFAULT ''"),
+    ("image_url", "image_url TEXT NOT NULL DEFAULT ''"),
 )
 
 

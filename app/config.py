@@ -133,6 +133,13 @@ class Settings:
         default_factory=lambda: _env_int("APS_MATCH_REVIEW_MIN_CONFIDENCE", 70)
     )
 
+    # ---- 主图相似度（成本对齐的第二个复核信号，无需 LLM）----
+    image_cache_path: Path = field(
+        default_factory=lambda: BASE_DIR
+        / os.getenv("APS_IMAGE_CACHE", "data/cache/image_hashes.json")
+    )
+    image_timeout: int = field(default_factory=lambda: _env_int("APS_IMAGE_TIMEOUT", 15))
+
     weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_WEIGHTS))
 
     @property
