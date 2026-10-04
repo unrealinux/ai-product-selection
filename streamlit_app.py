@@ -708,10 +708,11 @@ def page_costlink() -> None:
         )
 
     use_images = st.checkbox(
-        "用主图相似度复核低置信候选",
+        "用主图相似度复核候选",
         value=False,
-        help="两侧都有主图时用 dHash 比对（无需 LLM）：主图明显不同→判为不同款，"
-             "明显相同→升级为高置信。会下载图片；哈希缓存到 data/cache/image_hashes.json。",
+        help="两侧都有主图时用 dHash 比对（无需 LLM）：校验高置信匹配（主图明显不同→降级，"
+             "不直接删），并复核低置信候选（明显相同→升级，明显不同→判为不同款）。"
+             "会下载图片；哈希缓存到 data/cache/image_hashes.json。",
     )
     use_review = st.checkbox(
         "用大模型复核低置信候选",
@@ -817,10 +818,18 @@ def page_costlink() -> None:
             )
 
     if result.low_confidence:
-        with st.expander(f"低置信候选（{len(result.low_confidence)} 条，默认不应用）", expanded=False):
+        conflicts = [m for m in result.low_confidence if m.image_conflict]
+        with st.expander(f"低置信候选（{len(result.low_confidence)} 条，默认不应用）",
+                         expanded=bool(conflicts)):
+            if conflicts:
+                st.caption(f"其中 {len(conflicts)} 条原本是高置信，被主图否决后降级："
+                           "标题很像但主图明显不同。同款不同色/不同角度也会被压分，"
+                           "所以不直接删除，请人工或大模型再看一眼。")
             st.dataframe(
                 pd.DataFrame([
                     {"相似度": m.score, "成本": m.cost,
+                     "主图": (f"{m.image_score:.3f}" if m.image_score is not None else ""),
+                     "冲突": ("⚠️ 高置信被降级" if m.image_conflict else ""),
                      "淘宝商品": m.target.title, "← 可能的来源": m.supply_title}
                     for m in sorted(result.low_confidence, key=lambda x: -x.score)
                 ]),

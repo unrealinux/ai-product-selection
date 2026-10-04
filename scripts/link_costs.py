@@ -78,6 +78,8 @@ def parse_args() -> argparse.Namespace:
                         help=f"主图相似度 ≤ 此值视为不同款（默认 {IMAGE_WEAK}）")
     parser.add_argument("--no-image-cache", action="store_true",
                         help="不复用主图哈希缓存（默认缓存到 data/cache/image_hashes.json）")
+    parser.add_argument("--images-gray-only", action="store_true",
+                        help="主图只复核灰区候选，不校验高置信匹配（默认会校验）")
     parser.add_argument("--review-min-confidence", type=int, default=0,
                         help="模型自评置信度门槛，低于它保持低置信（默认取 APS_MATCH_REVIEW_MIN_CONFIDENCE）")
     parser.add_argument("--review-no-cache", action="store_true",
@@ -180,10 +182,18 @@ def main() -> int:
                 strong=args.image_strong,
                 weak=args.image_weak,
                 cache=ImageHashCache(enabled=not args.no_image_cache),
+                verify_high=not args.images_gray_only,
             )
             print(f"  主图复核：{image_report.summary()}")
             for message in image_report.notes:
                 print(f"  ℹ️  {message}")
+            if image_report.conflicts:
+                print(f"\n高置信匹配被主图否决（已降级为低置信，默认不写入，"
+                      f"{image_report.conflicts} 条）：")
+                for match in result.low_confidence:
+                    if match.image_conflict:
+                        print(f"  {match.score:.3f}  主图 {match.image_score:.3f}  "
+                              f"{match.target.title[:24]} ← {match.supply_title[:24]}")
             if image_report.promoted:
                 print(f"\n主图复核通过（已升级为高置信，{image_report.promoted} 条）：")
                 for match in result.accepted:

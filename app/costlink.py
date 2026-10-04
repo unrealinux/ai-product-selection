@@ -138,6 +138,8 @@ class CostMatch:
     review_confidence: int = 0
     #: 主图相似度 0-1（任一侧没有图时为 None）
     image_score: Optional[float] = None
+    #: 标题说同款但主图明显不同 —— 已从高置信降级
+    image_conflict: bool = False
 
     @property
     def margin(self) -> float:
@@ -330,15 +332,33 @@ class ImageReviewReport:
     ambiguous: int = 0
     no_image: int = 0
     failed: int = 0
+    #: 校验过的高置信匹配数，以及其中「主图确认一致」的数
+    verified_high: int = 0
+    confirmed: int = 0
+    #: 标题说同款、主图明显不同 → 降级为低置信的条数
+    conflicts: int = 0
+    #: 高置信匹配里因缺主图而没能校验的条数
+    no_image_high: int = 0
     notes: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
-        if not (self.compared or self.no_image or self.failed):
-            return "没有需要复核的低置信候选。"
-        parts = [f"主图比对 {self.compared} 组", f"升级为高置信 {self.promoted} 组",
-                 f"判定不同款 {self.rejected} 组", f"不确定 {self.ambiguous} 组"]
-        if self.no_image:
-            parts.append(f"缺主图跳过 {self.no_image} 组")
+        if not (self.compared or self.verified_high or self.no_image or self.failed):
+            return "没有可比对的主图。"
+        parts: list[str] = []
+        if self.verified_high:
+            text = f"校验高置信 {self.verified_high} 组（确认 {self.confirmed} 组"
+            if self.conflicts:
+                text += f"，结论冲突降级 {self.conflicts} 组"
+            parts.append(text + "）")
+        if self.compared:
+            parts.append(f"复核灰区 {self.compared} 组")
+            parts.append(f"升级为高置信 {self.promoted} 组")
+            parts.append(f"判定不同款 {self.rejected} 组")
+        if self.ambiguous:
+            parts.append(f"不确定 {self.ambiguous} 组")
+        skipped = self.no_image + self.no_image_high
+        if skipped:
+            parts.append(f"缺主图跳过 {skipped} 组")
         if self.failed:
             parts.append(f"图片下载/解码失败 {self.failed} 组")
         return "；".join(parts) + "。"
@@ -351,34 +371,84 @@ def apply_image_signals(
     strong: float = IMAGE_STRONG,
     weak: float = IMAGE_WEAK,
     cache: Any = None,
+    verify_high: bool = True,
 ) -> ImageReviewReport:
-    """用主图相似度复核低置信候选（无需 LLM，应先于大模型复核跑）。
+    """用主图相似度复核候选（无需 LLM，应先于大模型复核跑）。
 
-    只当**两侧都有主图**时才判断：
+    两件事，顺序固定：
 
-    - 相似度 ≥ ``strong`` → 升级为高置信（``method="image"``）
-    - 相似度 ≤ ``weak`` → 标记为 ``rejected``，不会写入
-    - 中间区间 → 只记录 ``image_score``，保持低置信（交给人工或大模型）
+    1. **校验高置信匹配**（``verify_high=True``）—— 标题相似度高不代表同一款货，
+       尤其 ``304`` vs ``316L`` 这类标题近乎相同的情况。两侧都有主图且
+       **主图明显不同（≤ weak）时降级为低置信**，而不是直接判为不同款：
+       同款不同色 / 不同角度也会被压分，直接删太武断。降级后它不会被默认写入，
+       并会被后续的大模型复核看见。主图一致（≥ strong）则只记录分数，保持高置信。
+
+    2. **复核灰区候选**：
+
+       - 相似度 ≥ ``strong`` → 升级为高置信（``method="image"``）
+       - 相似度 ≤ ``weak`` → 标记为 ``rejected``，不会写入
+       - 中间区间 → 只记录 ``image_score``，保持低置信（交给人工或大模型）
 
     ``similarity_fn`` 可注入（测试用）。算不出相似度时**保持原样** ——
     绝不能把「算不出来」当成「不相似」，否则缺图的商品会被静默判错。
+
+    已评估过（``image_score`` 非空）的匹配会被跳过，因此重复调用是幂等的。
     """
     from .imagehash import image_similarity
 
     report = ImageReviewReport()
-    candidates = result.low_confidence
-    if not candidates:
-        report.notes.append("没有需要复核的低置信候选。")
+    # 先快照灰区，避免第 1 步降级下来的匹配在第 2 步被重复处理
+    low_candidates = result.low_confidence
+    high_candidates = (
+        [m for m in result.matches if m.confidence == "high" and m.supply is not None]
+        if verify_high else []
+    )
+    if not low_candidates and not high_candidates:
+        report.notes.append("没有需要复核的候选。")
         return report
 
     fn = similarity_fn or (lambda a, b: image_similarity(a, b, cache=cache))
 
-    for match in candidates:
+    def compare(match: CostMatch) -> Optional[float]:
+        supply_url = match.supply.image_url if match.supply else ""
+        if not match.target.image_url or not supply_url:
+            return None
+        return fn(match.target.image_url, supply_url)
+
+    # ---- 1) 校验高置信匹配 ----
+    for match in high_candidates:
+        if match.image_score is not None:  # 已评估过
+            continue
+        supply_url = match.supply.image_url if match.supply else ""
+        if not match.target.image_url or not supply_url:
+            report.no_image_high += 1
+            continue
+        score = compare(match)
+        if score is None:
+            report.failed += 1
+            continue
+
+        match.image_score = round(float(score), 4)
+        report.verified_high += 1
+        if match.image_score <= weak:
+            # 标题说同款、主图说不同 → 降级，不删
+            match.confidence = "low"
+            match.image_conflict = True
+            report.conflicts += 1
+        elif match.image_score >= strong:
+            report.confirmed += 1
+        else:
+            report.ambiguous += 1
+
+    # ---- 2) 复核灰区候选 ----
+    for match in low_candidates:
+        if match.image_score is not None:  # 已评估过
+            continue
         supply_url = match.supply.image_url if match.supply else ""
         if not match.target.image_url or not supply_url:
             report.no_image += 1
             continue
-        score = fn(match.target.image_url, supply_url)
+        score = compare(match)
         if score is None:
             report.failed += 1
             continue
@@ -395,10 +465,16 @@ def apply_image_signals(
         else:
             report.ambiguous += 1
 
-    if report.no_image:
+    if report.conflicts:
         report.notes.append(
-            f"{report.no_image} 组候选至少一侧没有主图，无法比对 —— "
-            "保持低置信，不会因此被丢弃。"
+            f"{report.conflicts} 条高置信匹配的标题很像、但主图明显不同，已降级为低置信："
+            "同款不同色/不同角度也可能被压分，所以不直接删除，需要人工或大模型再看一眼。"
+        )
+    skipped = report.no_image + report.no_image_high
+    if skipped:
+        report.notes.append(
+            f"{skipped} 组候选至少一侧没有主图，无法比对 —— "
+            "保持原样，不会因此被丢弃。"
         )
     return report
 
@@ -418,11 +494,17 @@ def cost_note(note: str, match: CostMatch) -> str:
         label = "低置信经主图复核通过"
     else:
         label = "低置信" if match.confidence == "low" else "相似度"
+    if match.image_score is None:
+        image_text = ""
+    elif match.image_conflict:
+        image_text = (f"，主图相似度 {match.image_score:.3f}"
+                      "（与标题结论冲突，已从高置信降级）")
+    else:
+        image_text = f"，主图相似度 {match.image_score:.3f}"
     detail = (f"{COST_SEP}采购价 {match.cost:.2f} 元来自「{match.supply.title[:28]}」"
               f"（{label} {match.score:.3f}"
               + (f"，共同规格 {'/'.join(match.shared_specs)}" if match.shared_specs else "")
-              + (f"，主图相似度 {match.image_score:.3f}"
-                 if match.image_score is not None else "")
+              + image_text
               + (f"，大模型复核：{match.review_reason}（置信 {match.review_confidence}）"
                  if match.review_reason else "")
               + "），需人工复核")
