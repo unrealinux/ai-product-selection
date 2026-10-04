@@ -48,3 +48,28 @@ def test_backtest_tab_renders_with_data(temp_db):
     assert not app.exception, [exc.value for exc in app.exception]
     assert any("可比商品" in metric.label for metric in app.metric)
     assert service.backtest_run(run["id"]).sample_size == 6
+
+
+def test_costlink_review_branch_without_llm(temp_db, monkeypatch):
+    """勾选「大模型复核」但未配置 LLM 时，页面必须只提示、不报错。"""
+    import app.llm as llm
+    from app import db
+    from app.models import ProductIn
+
+    monkeypatch.setattr(llm, "is_available", lambda: False)
+    db.bulk_upsert([
+        ProductIn(title="304不锈钢保温杯 500ml 便携", source="taobao", price=99.0, cost=0.0),
+        ProductIn(title="316L保温杯 500ml", source="1688", price=50.0, cost=22.0),
+    ])
+
+    app = AppTest.from_file(str(APP_PATH), default_timeout=90).run()
+    assert not app.exception, [exc.value for exc in app.exception]
+
+    checkbox = next((c for c in app.checkbox if "大模型复核" in c.label), None)
+    assert checkbox is not None, "成本对齐页应有复核勾选框"
+    checkbox.set_value(True)
+
+    button = next(b for b in app.button if b.label == "预览匹配结果")
+    button.click().run()
+
+    assert not app.exception, [exc.value for exc in app.exception]

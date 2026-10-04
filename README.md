@@ -556,6 +556,46 @@ python scripts/link_costs.py --explain "304不锈钢保温杯 500ml|316L保温�
 
 Streamlit 的 **🔗 成本对齐** 页签有同样的流程：参数 → 预览 → 写入。
 
+### 低置信候选：让大模型复核
+
+标题相似度落在阈值下方一档的候选最尴尬：既不敢自动应用，也不该直接丢掉。
+而 Dice 系数恰好看不出这些语义差异：
+
+- `304` vs `316L` 是不同材质（规格 token 只能覆盖到一部分写法）
+- 单只 vs `4 件装` 是不同商品（数量差异不体现在相似度上）
+- `降噪耳机头戴式` vs `降噪耳机入耳式` 用途相同但形态不同
+
+加 `--review` 让大模型只对这批**灰区候选**做一次「是不是同一款货」的判断：
+
+```bash
+python scripts/link_costs.py --review --preview   # 先看复核结果，不写库
+python scripts/link_costs.py --review --apply      # 确认后写入
+```
+
+| 模型判断 | 处理 |
+| --- | --- |
+| 同款且置信度 ≥ 阈值 | **升级为高置信**，可被正常写入；`note` 写明「低置信经大模型复核通过（置信 91）」 |
+| 非同款且置信度 ≥ 阈值 | 标记为 `rejected`，**任何标志下都不写入**（含 `--include-low-confidence`） |
+| 置信度不足 / 没返回 | **保持低置信**，既不升级也不删除 |
+
+Streamlit 的 **🔗 成本对齐** 页签有对应的「用大模型复核低置信候选」勾选框，
+复核否决的候选会单独列在「大模型判定非同款」里，连同理由与置信度。
+
+几个刻意的设计：
+
+| 设计 | 理由 |
+| --- | --- |
+| 只复核灰区候选 | 高置信匹配不重复花钱；组数少，单次请求就能覆盖 |
+| 置信度不足时**宁可不判** | 不把不确定的判断当成结论，这是整个项目的原则 |
+| 结果按「标题对」缓存 | 重复运行不重复花 token（`APS_MATCH_REVIEW_CACHE`） |
+| 未配置 LLM 时自动跳过 | 低置信候选保持原样，不因为没有复核就被丢弃 |
+| `note` 写明复核来源 | 「低置信经大模型复核通过」不能被伪装成硬数据 |
+
+> 大模型复核会**降低但不能消除**错配风险。复核通过的匹配仍带「需人工复核」标注。
+
+相关环境变量：`APS_MATCH_REVIEW_MIN_CONFIDENCE`（默认 70）、
+`APS_MATCH_REVIEW_BATCH_SIZE`（默认 8）、`APS_MATCH_REVIEW_CACHE`。
+
 ### 安全设计
 
 | 设计 | 理由 |
@@ -915,6 +955,7 @@ ai-product-selection/
 │   ├── outcomes.py    # 效果回测：指标聚合 / 相关性 / Top vs 其余（纯函数）
 │   ├── tabular.py     # 表格导入：列名识别 / 单位换算 / 缺列推导
 │   ├── costlink.py    # 成本对齐：标题相似度匹配 + 负毛利诊断
+│   ├── match_review.py # 低置信匹配的大模型复核（灰区判定 + 缓存）
 │   ├── service.py     # 业务编排
 │   ├── enrich.py      # 补齐接口缺失的维度（详情接口 / 大模型估算）
 │   └── sources/
@@ -945,6 +986,7 @@ ai-product-selection/
 │   ├── test_service.py
 │   ├── test_api.py
 │   ├── test_outcomes.py
+│   ├── test_match_review.py
 │   └── test_streamlit.py
 ├── streamlit_app.py
 ├── conftest.py
@@ -978,7 +1020,8 @@ CI（`.github/workflows/ci.yml`）在 Python 3.10 / 3.12 / 3.13 上跑这两步�
 - [ ] 1688 官方 API 采集器 —— **阻塞**：签名算法需官方文档或真实 appKey 才能核实（见上文）
 - [x] 用真实转化率回测权重（`product_outcomes` + Spearman + Top/其余倍差）
 - [ ] 随机分组 A/B，把回测从**相关性**推进到**因果**（当前结论不能当「提升了 x% 利润」的证据）
-- [ ] 匹配提质：现在只用标题，可加入图片相似度或 LLM 复核低置信候选
+- [x] 匹配提质：低置信候选走大模型复核（`scripts/link_costs.py --review`，置信不足时保持低置信）
+- [ ] 匹配提质：图片相似度（淘宝 `item-detail` 有图；1688 表里若带主图链接即可做感知哈希）
 - [ ] 选品结果导出为采购单 / 上架任务
 
 ## License

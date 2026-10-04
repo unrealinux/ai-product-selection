@@ -706,9 +706,19 @@ def page_costlink() -> None:
             "所以下面先预览、确认后再写入，低置信候选默认不应用。"
         )
 
+    use_review = st.checkbox(
+        "用大模型复核低置信候选",
+        value=False,
+        help="只复核落在阈值下方的候选：判定同款的升级为高置信，判定非同款的不再写入。"
+             "需要配置 APS_LLM_*，会产生 token 消耗（结果按标题对缓存，重复跑不重复花）。",
+    )
+    if use_review and not llm.is_available():
+        st.caption("⚠️ 未配置 APS_LLM_*，复核不可用；低置信候选会保持原样。")
+
     if st.button("预览匹配结果", type="primary"):
-        with st.spinner("正在匹配…"):
-            st.session_state["costlink_result"] = link_costs(
+        spinner = "正在匹配…" + ("，并用大模型复核低置信候选…" if use_review else "")
+        with st.spinner(spinner):
+            result = link_costs(
                 products,
                 target_source="" if target_source.startswith("（") else target_source,
                 supply_source="" if supply_source.startswith("（") else supply_source,
@@ -716,6 +726,13 @@ def page_costlink() -> None:
                 min_shared_specs=int(min_specs),
                 dry_run=True,
             )
+            if use_review and llm.is_available():
+                from app.match_review import review_matches
+
+                st.session_state["costlink_review"] = review_matches(result)
+            else:
+                st.session_state.pop("costlink_review", None)
+            st.session_state["costlink_result"] = result
 
     result = st.session_state.get("costlink_result")
     if result is None:
@@ -725,6 +742,13 @@ def page_costlink() -> None:
 
     st.divider()
     st.markdown(f"**{result.summary()}**")
+    review_report = st.session_state.get("costlink_review")
+    if review_report is not None:
+        st.info(f"大模型复核：{review_report.summary()}")
+        for message in review_report.errors:
+            st.warning(message)
+        for message in review_report.notes:
+            st.caption(f"ℹ️ {message}")
     for warning in result.warnings:
         st.warning(warning)
 
@@ -734,6 +758,7 @@ def page_costlink() -> None:
             pd.DataFrame([
                 {"相似度": m.score, "售价": m.target.price, "成本": m.cost,
                  "毛利率": f"{m.margin:.1%}", "共同规格": "/".join(m.shared_specs),
+                 "复核": (f"LLM 通过 {m.review_confidence}" if m.method == "llm_review" else ""),
                  "淘宝商品": m.target.title, "← 供货来源": m.supply_title}
                 for m in sorted(result.accepted, key=lambda x: -x.score)
             ]),
@@ -743,6 +768,19 @@ def page_costlink() -> None:
                 "毛利率": st.column_config.TextColumn("毛利率"),
             },
         )
+
+    if result.rejected:
+        with st.expander(f"大模型判定「非同款」（{len(result.rejected)} 条，不会写入）",
+                         expanded=True):
+            st.caption("模型认为这些候选与零售商品不是同一款货（规格/形态/套装数不同）。")
+            st.dataframe(
+                pd.DataFrame([
+                    {"相似度": m.score, "置信": m.review_confidence, "理由": m.review_reason,
+                     "淘宝商品": m.target.title, "← 供货来源": m.supply_title}
+                    for m in result.rejected
+                ]),
+                width="stretch", hide_index=True,
+            )
 
     if result.low_confidence:
         with st.expander(f"低置信候选（{len(result.low_confidence)} 条，默认不应用）", expanded=False):

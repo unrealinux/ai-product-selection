@@ -40,6 +40,7 @@ from app.costlink import (  # noqa: E402
     margin_report,
     title_similarity,
 )
+from app.match_review import review_matches  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -65,6 +66,12 @@ def parse_args() -> argparse.Namespace:
                         help="覆盖已有成本（默认不覆盖：已有成本更可信）")
     parser.add_argument("--include-low-confidence", action="store_true",
                         help="连同低置信候选一起写入（不建议）")
+    parser.add_argument("--review", action="store_true",
+                        help="用大模型复核低置信候选（消耗 token；通过的会升级为高置信）")
+    parser.add_argument("--review-min-confidence", type=int, default=0,
+                        help="模型自评置信度门槛，低于它保持低置信（默认取 APS_MATCH_REVIEW_MIN_CONFIDENCE）")
+    parser.add_argument("--review-no-cache", action="store_true",
+                        help="复核时不使用缓存（缓存默认开启，按标题对去重）")
     parser.add_argument("--limit", type=int, default=0, help="最多处理多少个待补商品")
     parser.add_argument("--top", type=int, default=15, help="打印前 N 条匹配")
 
@@ -149,6 +156,34 @@ def main() -> int:
     print(f"\n{result.summary()}")
     for warning in result.warnings:
         print(f"  ⚠️  {warning}")
+
+    if args.review:
+        from app.match_review import ReviewCache
+
+        print("\n正在用大模型复核低置信候选…")
+        report = review_matches(
+            result,
+            min_confidence=args.review_min_confidence or None,
+            cache=ReviewCache(enabled=not args.review_no_cache),
+        )
+        print(f"  复核结果：{report.summary()}")
+        for message in report.errors:
+            print(f"  ❌ {message}")
+        for message in report.notes:
+            print(f"  ℹ️  {message}")
+        if report.promoted:
+            print(f"\n复核通过（已升级为高置信，{report.promoted} 条）：")
+            for match in result.accepted:
+                if match.method == "llm_review":
+                    print(f"  {match.score:.3f}  {match.target.title[:24]}"
+                          f" ← {match.supply_title[:24]}"
+                          f"　（置信 {match.review_confidence}：{match.review_reason}）")
+        if report.rejected:
+            print(f"\n复核否决（判定非同款，{report.rejected} 条，不会写入）：")
+            for match in result.rejected:
+                print(f"  {match.score:.3f}  {match.target.title[:24]}"
+                      f" ← {match.supply_title[:24]}"
+                      f"　（置信 {match.review_confidence}：{match.review_reason}）")
 
     if result.matches:
         print_matches(result, args.top)

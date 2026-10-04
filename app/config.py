@@ -120,6 +120,19 @@ class Settings:
     enrich_batch_size: int = field(default_factory=lambda: _env_int("APS_ENRICH_BATCH_SIZE", 8))
     enrich_detail_limit: int = field(default_factory=lambda: _env_int("APS_ENRICH_DETAIL_LIMIT", 0))
 
+    # ---- 成本对齐的低置信候选复核 ----
+    match_review_cache_path: Path = field(
+        default_factory=lambda: BASE_DIR
+        / os.getenv("APS_MATCH_REVIEW_CACHE", "data/cache/llm_match_reviews.json")
+    )
+    match_review_batch_size: int = field(
+        default_factory=lambda: _env_int("APS_MATCH_REVIEW_BATCH_SIZE", 8)
+    )
+    #: 模型自评置信度低于此值时不采纳其判断（保持低置信）
+    match_review_min_confidence: int = field(
+        default_factory=lambda: _env_int("APS_MATCH_REVIEW_MIN_CONFIDENCE", 70)
+    )
+
     weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_WEIGHTS))
 
     @property

@@ -129,6 +129,9 @@ class CostMatch:
     method: str = "title"
     confidence: str = "high"
     shared_specs: list[str] = field(default_factory=list)
+    #: 大模型复核给出的理由与置信度（未复核时为空）
+    review_reason: str = ""
+    review_confidence: int = 0
 
     @property
     def margin(self) -> float:
@@ -169,6 +172,11 @@ class LinkResult:
         return [m for m in self.matches if m.confidence == "low" and m.supply is not None]
 
     @property
+    def rejected(self) -> list[CostMatch]:
+        """大模型复核判定为「不是同一款」的候选。"""
+        return [m for m in self.matches if m.confidence == "rejected" and m.supply is not None]
+
+    @property
     def margins(self) -> list[float]:
         return [m.margin for m in self.accepted if m.margin > 0]
 
@@ -179,6 +187,8 @@ class LinkResult:
             f"低置信候选 {len(self.low_confidence)} 个",
             f"无匹配 {self.no_supply} 个",
         ]
+        if self.rejected:
+            parts.append(f"大模型判定非同款 {len(self.rejected)} 个")
         if self.skipped_existing:
             parts.append(f"已有成本跳过 {self.skipped_existing} 个")
         if self.dry_run:
@@ -309,10 +319,15 @@ def cost_note(note: str, match: CostMatch) -> str:
     body = (note or "").split(COST_SEP)[0]
     if match.supply is None:
         return body
-    label = "低置信" if match.confidence == "low" else "相似度"
+    if match.method == "llm_review":
+        label = "低置信经大模型复核通过"
+    else:
+        label = "低置信" if match.confidence == "low" else "相似度"
     detail = (f"{COST_SEP}采购价 {match.cost:.2f} 元来自「{match.supply.title[:28]}」"
               f"（{label} {match.score:.3f}"
               + (f"，共同规格 {'/'.join(match.shared_specs)}" if match.shared_specs else "")
+              + (f"，大模型复核：{match.review_reason}（置信 {match.review_confidence}）"
+                 if match.review_reason else "")
               + "），需人工复核")
     return f"{body}{detail}"
 
@@ -336,6 +351,9 @@ def apply_matches(result: LinkResult, *, include_low_confidence: bool = False,
     written = 0
     for match in result.matches:
         if match.supply is None:
+            continue
+        if match.confidence == "rejected":
+            # 大模型明确判定「非同款」的，任何标志下都不写入
             continue
         if match.confidence == "low" and not include_low_confidence:
             continue
