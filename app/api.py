@@ -9,12 +9,13 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import date
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from . import __version__, crawler, db, llm, service
+from . import __version__, crawler, db, llm, outcomes, service
 from .config import settings
 from .models import Product, ProductIn
 from .sources.douyin import ERROR_CODES, DouyinClient, DouyinError
@@ -99,6 +100,9 @@ def import_products(payload: ImportRequest) -> ImportResponse:
 
     try:
         products = source.fetch()
+    except FileNotFoundError as exc:
+        # 数据文件在 fetch 阶段才被打开，这里也必须映射成 404
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except DouyinError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     saved = service.import_products(products)
@@ -305,6 +309,124 @@ def compare(
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return _comparison_payload(result)
+
+
+# --------------------------------------------------------------------------- #
+# 效果回测：经营结果 + 决策记录
+# --------------------------------------------------------------------------- #
+
+class OutcomeRequest(BaseModel):
+    """录入一段经营结果。
+
+    同一 ``(product_id, window_start, window_end)`` 重复提交会更新而非新增。
+    """
+
+    product_id: int = Field(..., description="商品主键")
+    window_start: date = Field(..., description="统计开始日 YYYY-MM-DD")
+    window_end: date = Field(..., description="统计结束日 YYYY-MM-DD")
+    impressions: float = Field(0.0, ge=0, description="曝光")
+    clicks: float = Field(0.0, ge=0, description="点击")
+    orders: float = Field(0.0, ge=0, description="订单数")
+    units: float = Field(0.0, ge=0, description="销量（件）")
+    returns: float = Field(0.0, ge=0, description="退货件数")
+    revenue: float = Field(0.0, ge=0, description="成交金额（元）")
+    cogs: float = Field(0.0, ge=0, description="实际采购成本（元）")
+    ad_spend: float = Field(0.0, ge=0, description="推广花费（元）")
+    note: str = Field("", max_length=500)
+    source: str = Field("manual", max_length=32, description="数据来源，如 生意参谋导出")
+
+
+class DecisionRequest(BaseModel):
+    """记录一次选品决策。"""
+
+    product_id: int
+    run_id: Optional[int] = Field(None, description="关联的打分快照 id")
+    action: str = Field("push", pattern="^(push|hold|skip)$", description="push / hold / skip")
+    note: str = Field("", max_length=500)
+
+
+@app.get("/metrics", summary="回测可用指标")
+def list_metrics() -> list[dict[str, Any]]:
+    return [
+        {"name": name, "label": spec["label"], "higher_better": spec["higher_better"]}
+        for name, spec in outcomes.METRICS.items()
+    ]
+
+
+@app.post("/outcomes", status_code=201, summary="录入经营结果")
+def create_outcome(payload: OutcomeRequest) -> dict[str, Any]:
+    try:
+        return service.record_outcome(**payload.model_dump())
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/outcomes", summary="经营结果列表")
+def list_outcomes(
+    product_id: Optional[int] = Query(None),
+    limit: int = Query(500, ge=1, le=5000),
+) -> list[dict[str, Any]]:
+    return service.list_outcomes(product_id=product_id, limit=limit)
+
+
+@app.delete("/outcomes/{outcome_id}", summary="删除经营结果")
+def remove_outcome(outcome_id: int) -> dict[str, Any]:
+    if not service.delete_outcome(outcome_id):
+        raise HTTPException(status_code=404, detail=f"结果记录 {outcome_id} 不存在")
+    return {"deleted": outcome_id}
+
+
+@app.post("/decisions", status_code=201, summary="记录选品决策")
+def create_decision(payload: DecisionRequest) -> dict[str, Any]:
+    try:
+        return service.record_decision(**payload.model_dump())
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/decisions", summary="决策记录列表")
+def list_decisions(
+    run_id: Optional[int] = Query(None),
+    product_id: Optional[int] = Query(None),
+) -> list[dict[str, Any]]:
+    return service.list_decisions(run_id=run_id, product_id=product_id)
+
+
+@app.get("/runs/{run_id}/backtest", summary="用真实经营结果回测该快照")
+def run_backtest(
+    run_id: int,
+    metric: str = Query(outcomes.DEFAULT_METRIC, description="指标名，见 /metrics"),
+    top_ratio: float = Query(0.3, gt=0, le=1, description="Top 组占比"),
+) -> dict[str, Any]:
+    try:
+        result = service.backtest_run(run_id, metric=metric, top_ratio=top_ratio)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result.as_dict()
+
+
+@app.get("/backtest/compare", summary="对比两次快照的预测力")
+def compare_backtest(
+    run_a: int = Query(..., description="快照 A 的 id"),
+    run_b: int = Query(..., description="快照 B 的 id"),
+    metric: str = Query(outcomes.DEFAULT_METRIC),
+    top_ratio: float = Query(0.3, gt=0, le=1),
+) -> dict[str, Any]:
+    try:
+        comparison = service.compare_backtests(
+            run_a, run_b, metric=metric, top_ratio=top_ratio
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return comparison.as_dict()
 
 
 # --------------------------------------------------------------------------- #

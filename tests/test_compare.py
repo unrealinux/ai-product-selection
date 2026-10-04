@@ -11,7 +11,6 @@ import pytest
 from app import db
 from app.compare import (
     DimensionImpact,
-    Mover,
     average_ranks,
     compare_runs,
     spearman,

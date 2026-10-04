@@ -33,7 +33,6 @@ import statistics
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional, Sequence
 
-from .enrich import PROVENANCE_SEP
 from .models import ProductIn
 from .sources.taobao import strip_highlight
 

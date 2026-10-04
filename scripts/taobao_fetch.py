@@ -106,7 +106,7 @@ def cmd_check(client: TaobaoA2AClient) -> int:
         print(f"❌ agent card 读取失败：{exc}", file=sys.stderr)
         return 1
 
-    print(f"✅ agent card 可达")
+    print("✅ agent card 可达")
     print(f"   name        : {card.get('name')}")
     print(f"   description : {card.get('description')}")
     print(f"   provider    : {(card.get('provider') or {}).get('organization')}")

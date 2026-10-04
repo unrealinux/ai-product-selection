@@ -26,7 +26,6 @@ from app import service  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.enrich import enrich  # noqa: E402
 from app.sources.douyin import (  # noqa: E402
-    ERROR_CODES,
     FIELD_PROVENANCE,
     DouyinAPIError,
     DouyinClient,

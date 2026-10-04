@@ -23,14 +23,13 @@ import hashlib
 import hmac
 import json
 import logging
-import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Optional
 
 from ..config import settings
 from ..crawler import Source
 from ..models import ProductIn
-from ..scoring import clamp, linear_map, log_scale
+from ..scoring import linear_map, log_scale
 
 logger = logging.getLogger(__name__)
 

@@ -98,6 +98,42 @@ CREATE TABLE IF NOT EXISTS mapping_profiles (
 );
 
 CREATE INDEX IF NOT EXISTS idx_mapping_fingerprint ON mapping_profiles(fingerprint);
+
+-- 真实经营结果（用于回测「哪套权重更赚钱」）
+CREATE TABLE IF NOT EXISTS product_outcomes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id  INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    window_start TEXT   NOT NULL,
+    window_end   TEXT   NOT NULL,
+    impressions REAL    NOT NULL DEFAULT 0,
+    clicks      REAL    NOT NULL DEFAULT 0,
+    orders      REAL    NOT NULL DEFAULT 0,
+    units       REAL    NOT NULL DEFAULT 0,
+    returns     REAL    NOT NULL DEFAULT 0,
+    revenue     REAL    NOT NULL DEFAULT 0,
+    cogs        REAL    NOT NULL DEFAULT 0,
+    ad_spend    REAL    NOT NULL DEFAULT 0,
+    note        TEXT    NOT NULL DEFAULT '',
+    source      TEXT    NOT NULL DEFAULT 'manual',
+    created_at  TEXT    NOT NULL,
+    updated_at  TEXT    NOT NULL,
+    UNIQUE (product_id, window_start, window_end)
+);
+
+CREATE INDEX IF NOT EXISTS idx_outcomes_product ON product_outcomes(product_id);
+
+-- 决策记录：当时决定推哪些商品、放弃哪些，用于事后归因
+CREATE TABLE IF NOT EXISTS decisions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    run_id     INTEGER REFERENCES score_runs(id) ON DELETE SET NULL,
+    action     TEXT    NOT NULL DEFAULT 'push',
+    note       TEXT    NOT NULL DEFAULT '',
+    decided_at TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_decisions_product ON decisions(product_id);
+CREATE INDEX IF NOT EXISTS idx_decisions_run     ON decisions(run_id);
 """
 
 PRODUCT_FIELDS = (
@@ -533,3 +569,120 @@ def delete_mapping_profile(name_or_id: str | int,
     with session(db_path) as conn:
         conn.execute("DELETE FROM mapping_profiles WHERE id = ?", (record["id"],))
     return True
+
+
+# --------------------------------------------------------------------------- #
+# 真实经营结果（回测用）
+# --------------------------------------------------------------------------- #
+
+#: 结果表里的数值字段，统一转成 float 写入
+OUTCOME_NUMERIC_FIELDS: tuple[str, ...] = (
+    "impressions", "clicks", "orders", "units", "returns",
+    "revenue", "cogs", "ad_spend",
+)
+
+
+def upsert_outcome(product_id: int, window_start: str, window_end: str, *,
+                   impressions: float = 0.0, clicks: float = 0.0,
+                   orders: float = 0.0, units: float = 0.0, returns: float = 0.0,
+                   revenue: float = 0.0, cogs: float = 0.0, ad_spend: float = 0.0,
+                   note: str = "", source: str = "manual",
+                   db_path: Path | str | None = None) -> dict[str, Any]:
+    """写入一段经营结果。同一 ``(product_id, window_start, window_end)`` 更新而非新增。"""
+    now = datetime.now().isoformat(timespec="seconds")
+    values = {
+        "impressions": float(impressions or 0.0),
+        "clicks": float(clicks or 0.0),
+        "orders": float(orders or 0.0),
+        "units": float(units or 0.0),
+        "returns": float(returns or 0.0),
+        "revenue": float(revenue or 0.0),
+        "cogs": float(cogs or 0.0),
+        "ad_spend": float(ad_spend or 0.0),
+    }
+    columns = ["product_id", "window_start", "window_end", *OUTCOME_NUMERIC_FIELDS,
+               "note", "source", "created_at", "updated_at"]
+    placeholders = ", ".join("?" for _ in columns)
+    updates = ", ".join(
+        f"{field}=excluded.{field}" for field in (*OUTCOME_NUMERIC_FIELDS, "note", "source")
+    )
+    with session(db_path) as conn:
+        conn.execute(
+            f"INSERT INTO product_outcomes ({', '.join(columns)}) VALUES ({placeholders}) "
+            f"ON CONFLICT (product_id, window_start, window_end) DO UPDATE SET "
+            f"{updates}, updated_at=excluded.updated_at",
+            [product_id, window_start, window_end,
+             *(values[field] for field in OUTCOME_NUMERIC_FIELDS),
+             note, source, now, now],
+        )
+        row = conn.execute(
+            "SELECT * FROM product_outcomes WHERE product_id = ? "
+            "AND window_start = ? AND window_end = ?",
+            (product_id, window_start, window_end),
+        ).fetchone()
+    return dict(row)
+
+
+def list_outcomes(product_id: int | None = None, limit: int = 1000,
+                  db_path: Path | str | None = None) -> list[dict[str, Any]]:
+    """列出经营结果（可按商品过滤），按窗口倒序。"""
+    clause, params = ("WHERE product_id = ?", [product_id]) if product_id else ("", [])
+    with session(db_path) as conn:
+        rows = conn.execute(
+            f"SELECT * FROM product_outcomes {clause} "
+            "ORDER BY window_start DESC, id DESC LIMIT ?",
+            [*params, limit],
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def delete_outcome(outcome_id: int, db_path: Path | str | None = None) -> bool:
+    with session(db_path) as conn:
+        cursor = conn.execute("DELETE FROM product_outcomes WHERE id = ?", (outcome_id,))
+    return cursor.rowcount > 0
+
+
+# --------------------------------------------------------------------------- #
+# 决策记录
+# --------------------------------------------------------------------------- #
+
+def record_decision(product_id: int, run_id: int | None = None, action: str = "push",
+                    note: str = "", decided_at: str | None = None,
+                    db_path: Path | str | None = None) -> dict[str, Any]:
+    """记录一次「推 / 压 / 拒」的选品决策。"""
+    stamp = decided_at or datetime.now().isoformat(timespec="seconds")
+    with session(db_path) as conn:
+        cursor = conn.execute(
+            "INSERT INTO decisions (product_id, run_id, action, note, decided_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (product_id, run_id, action, note, stamp),
+        )
+        row = conn.execute(
+            "SELECT * FROM decisions WHERE id = ?", (cursor.lastrowid,)
+        ).fetchone()
+    return dict(row)
+
+
+def list_decisions(run_id: int | None = None, product_id: int | None = None,
+                   limit: int = 500,
+                   db_path: Path | str | None = None) -> list[dict[str, Any]]:
+    clauses, params = [], []
+    if run_id is not None:
+        clauses.append("run_id = ?")
+        params.append(run_id)
+    if product_id is not None:
+        clauses.append("product_id = ?")
+        params.append(product_id)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    with session(db_path) as conn:
+        rows = conn.execute(
+            f"SELECT * FROM decisions {where} ORDER BY id DESC LIMIT ?",
+            [*params, limit],
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def delete_decision(decision_id: int, db_path: Path | str | None = None) -> bool:
+    with session(db_path) as conn:
+        cursor = conn.execute("DELETE FROM decisions WHERE id = ?", (decision_id,))
+    return cursor.rowcount > 0

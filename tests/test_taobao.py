@@ -22,7 +22,6 @@ from app.sources.taobao import (
     MAX_DETAIL_IDS,
     RANK_HEAT_BOTTOM,
     RANK_HEAT_TOP,
-    SKILL_DETAIL,
     SKILL_SEARCH,
     A2AResult,
     TaobaoA2AClient,

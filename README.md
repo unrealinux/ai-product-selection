@@ -79,7 +79,7 @@ streamlit run streamlit_app.py
 # 打开 http://localhost:8501
 ```
 
-看板包含五个页签：**选品榜单 / 数据导入 / 抖音拉取 / 商品录入 / 数据概览**，支持 CSV 导出。
+看板包含十个页签：**选品榜单 / 数据导入 / 表格导入 / 抖音拉取 / 淘宝拉取 / 成本对齐 / 权重调参 / 效果回测 / 商品录入 / 数据概览**，支持 CSV 导出。
 
 ---
 
@@ -694,6 +694,97 @@ python scripts/tune_weights.py --save 我的方案 --weights "毛利率=0.4,需�
 
 ---
 
+## 效果回测（哪套权重更赚钱）
+
+### 为什么需要它
+
+上一节回答的是「换权重，排序会不会变」。但两套权重给出不同排序时，**谁对谁错**只有真实结果能判定。
+
+没有结果数据时，这个项目的一切结论都建立在「分数高的商品更值得做」这个**假设**上。
+回测就是把这个假设拿去检验。
+
+### 怎么用
+
+```bash
+# 1) 录入经营结果：CSV / Excel 直接导（先预览）
+python scripts/record_outcome.py --file 生意参谋导出.csv --preview
+python scripts/record_outcome.py --file 生意参谋导出.csv --import --source 生意参谋
+
+# 2) 回测某个快照
+python scripts/backtest.py --runs
+python scripts/backtest.py --run 1 --metric gross_profit
+
+# 3) 两套权重谁更能预测结果
+python scripts/backtest.py --compare 1 2 --metric orders
+
+# 不知道结果表该长什么样？
+python scripts/backtest.py --template > 结果表.csv
+```
+
+Streamlit 的 **🎯 效果回测** 页签有同样的流程：录入结果（表单）、单快照回测、两快照对比。
+
+### 结果表字段
+
+表里的列名会自动识别（中英文别名，复用表格导入那套逻辑）：
+
+| 列 | 说明 |
+| --- | --- |
+| 商品ID / 商品标题 | 二选一，用于匹配商品；ID 匹配优先 |
+| 开始日期 / 结束日期 | 支持 `2024-03-01` / `2024/3/1`；表里没有就用 `--start --end` |
+| 曝光 / 点击 / 订单数 / 销量 / 退货件数 | 计数 |
+| 成交金额 / 采购成本 / 推广花费 | 金额（元） |
+
+同一 `(商品, 起止日期)` 重复导入是**更新**而不是新增，所以同一份报表可以反复导。
+
+### 可回测的指标
+
+| 指标 | 中文 | 方向 |
+| --- | --- | --- |
+| `gross_profit` | 毛利额（成交额 − 采购成本 − 推广花费） | 越大越好（默认） |
+| `revenue` / `orders` / `units` | 成交金额 / 订单数 / 销量 | 越大越好 |
+| `roi` | 投产比 | 越大越好 |
+| `cvr` / `ctr` | 转化率 / 点击率 | 越大越好 |
+| `return_rate` | 退货率 | **越小越好**（结论方向会自动翻转） |
+
+### 怎么读结论
+
+```
+快照「基线-均衡」× 指标「毛利额」：可比商品 12 个；Spearman ρ = 1.0000；
+Top4 均值 1420.0 元 vs 其余 700.0 元；倍差 2.03×；
+打分与结果同向且 Top 组明显更好（ρ=1.00）—— 权重可用。
+```
+
+| 方向校正后的 ρ | 含义 |
+| --- | --- |
+| ≤ −0.30 | **打分与结果反向** —— 当前权重可能在帮倒忙 |
+| 0.50 ~ 1.00 | 方向正确；再看倍差是否 ≥ 1.2× 判断区分度 |
+| −0.30 ~ 0.50 | 关联很弱，权重区分度不足或样本太杂 |
+| 样本 < 5 | 一律提示「样本不足」，不给确定性结论 |
+
+### 几个刻意的设计
+
+| 设计 | 理由 |
+| --- | --- |
+| **先加原始量再算比率** | 先算每段转化率再平均，会把「曝光 10 次」和「曝光 10 万次」等权，结论是错的 |
+| 没有结果数据的商品**不参与**回测 | 而不是拿 0 顶替 —— 否则会把「还没上架」当成「卖得很差」 |
+| 指标**全相同**时显式报警 | 此时 ρ 没有意义，必须说清楚而不是给一个数字 |
+| 退货率等反向指标自动翻转方向 | 直接拿 ρ 判好坏会得出相反结论 |
+| 结论里始终带一句「相关性而非因果」 | 被推的商品本身可能就更好卖；要接近因果需要随机分组做 A/B |
+| 结果表每行都记 `source` | 和商品维度一样，数据来源必须可追溯 |
+
+### 决策记录
+
+除了结果，还能记录当时的决策（推 / 压 / 拒），用于事后归因：
+
+```bash
+curl -X POST http://127.0.0.1:8000/decisions -H "Content-Type: application/json" \
+  -d '{"product_id": 3, "run_id": 1, "action": "push", "note": "主推"}'
+```
+
+删除商品会级联删掉它的结果与决策；删除快照则**保留**决策、只把 `run_id` 置空。
+
+---
+
 ## API 一览
 
 | 方法 | 路径 | 说明 |
@@ -718,6 +809,14 @@ python scripts/tune_weights.py --save 我的方案 --weights "毛利率=0.4,需�
 | `DELETE` | `/runs/{id}` | 删除快照 |
 | `GET` | `/runs/{id}/sensitivity` | 各维度对排序的影响力 |
 | `GET` | `/compare` | 对比两个快照（A/B） |
+| `GET` | `/metrics` | 回测可用指标 |
+| `POST` | `/outcomes` | 录入经营结果（同商品同窗口覆盖） |
+| `GET` | `/outcomes` | 经营结果列表 |
+| `DELETE` | `/outcomes/{id}` | 删除经营结果 |
+| `POST` | `/decisions` | 记录选品决策（push / hold / skip） |
+| `GET` | `/decisions` | 决策记录列表 |
+| `GET` | `/runs/{id}/backtest` | 用真实结果回测该快照 |
+| `GET` | `/backtest/compare` | 对比两次快照的预测力 |
 | `GET` | `/douyin/status` | 抖音数据源配置状态 + 官返回码释义 |
 | `POST` | `/douyin/token` | 换取 access_token（调试用，结果不落盘） |
 
@@ -813,6 +912,7 @@ ai-product-selection/
 │   ├── scoring.py     # 规则打分引擎（纯函数，可单测）
 │   ├── weights.py     # 权重方案：预设 / 校验 / 归一化
 │   ├── compare.py     # 快照对比与维度影响力（Spearman / Top-N 重合）
+│   ├── outcomes.py    # 效果回测：指标聚合 / 相关性 / Top vs 其余（纯函数）
 │   ├── tabular.py     # 表格导入：列名识别 / 单位换算 / 缺列推导
 │   ├── costlink.py    # 成本对齐：标题相似度匹配 + 负毛利诊断
 │   ├── service.py     # 业务编排
@@ -829,6 +929,8 @@ ai-product-selection/
 │   ├── import_table.py
 │   ├── link_costs.py
 │   ├── tune_weights.py
+│   ├── record_outcome.py  # 录入经营结果（列名自动识别）
+│   ├── backtest.py        # 效果回测 CLI
 │   └── seed_data.py
 ├── tests/
 │   ├── fixtures/      # 淘宝 A2A 真实响应切片
@@ -838,18 +940,30 @@ ai-product-selection/
 │   ├── test_compare.py
 │   ├── test_tabular.py
 │   ├── test_costlink.py
-│   └── test_scoring.py
+│   ├── test_scoring.py
+│   ├── test_db.py
+│   ├── test_service.py
+│   ├── test_api.py
+│   ├── test_outcomes.py
+│   └── test_streamlit.py
 ├── streamlit_app.py
 ├── conftest.py
 ├── requirements.txt
+├── requirements-dev.txt
 └── .env.example
 ```
 
 ## 测试
 
 ```bash
+pip install -r requirements-dev.txt
+ruff check .
 pytest -q
 ```
+
+CI（`.github/workflows/ci.yml`）在 Python 3.10 / 3.12 / 3.13 上跑这两步。
+测试全部使用临时 SQLite（`conftest.py` 的 `temp_db` fixture），不会碰 `data/products.db`。
+看板有一个 `AppTest` 冒烟测试，保证整页能渲染不报错。
 
 ## 后续规划
 
@@ -862,8 +976,9 @@ pytest -q
 - [x] 淘宝官方 A2A 接口接入（真实售价 + 规格属性，绕开 CLI 内测门槛）
 - [x] 1688 供货价 × 淘宝售价的**真实毛利率闭环**（标题相似度匹配 + 负毛利诊断）
 - [ ] 1688 官方 API 采集器 —— **阻塞**：签名算法需官方文档或真实 appKey 才能核实（见上文）
+- [x] 用真实转化率回测权重（`product_outcomes` + Spearman + Top/其余倍差）
+- [ ] 随机分组 A/B，把回测从**相关性**推进到**因果**（当前结论不能当「提升了 x% 利润」的证据）
 - [ ] 匹配提质：现在只用标题，可加入图片相似度或 LLM 复核低置信候选
-- [ ] 用真实转化率回测权重（目前只能比排序差异，还不能回答「哪套权重更赚钱」）
 - [ ] 选品结果导出为采购单 / 上架任务
 
 ## License

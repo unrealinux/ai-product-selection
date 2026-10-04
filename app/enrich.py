@@ -425,30 +425,30 @@ def _apply(
     updates: dict[str, Any] = {}
     labels: dict[str, str] = {}
 
-    for field in ("weight_kg", "repurchase", "compliance_risk", "virality", "heat"):
-        if field not in values:
+    for key in ("weight_kg", "repurchase", "compliance_risk", "virality", "heat"):
+        if key not in values:
             continue
-        if allowed is not None and field not in allowed:
+        if allowed is not None and key not in allowed:
             continue  # 本次没问这个字段，即使模型返回了也不采纳
-        policy = VALUE_POLICY[field]
-        if field == "heat" and override_heat:
+        policy = VALUE_POLICY[key]
+        if key == "heat" and override_heat:
             policy = "override"
-        current = getattr(product, field, 0.0) or 0.0
+        current = getattr(product, key, 0.0) or 0.0
 
         if policy == "override":
-            if field == "heat":
-                labels[field] = f"大模型覆盖（原销量映射 {current:.0f}）"
+            if key == "heat":
+                labels[key] = f"大模型覆盖（原销量映射 {current:.0f}）"
             else:
-                labels[field] = f"大模型判断（原佣金率代理 {current:.0f}）"
-            updates[field] = values[field]
+                labels[key] = f"大模型判断（原佣金率代理 {current:.0f}）"
+            updates[key] = values[key]
         elif policy == "fill_only":
             if current > 0:
                 continue  # 接口有硬数据，不覆盖
-            labels[field] = "大模型估算（接口值为 0）"
-            updates[field] = values[field]
+            labels[key] = "大模型估算（接口值为 0）"
+            updates[key] = values[key]
         else:  # fill
-            labels[field] = "大模型估算"
-            updates[field] = values[field]
+            labels[key] = "大模型估算"
+            updates[key] = values[key]
 
     if allowed is None or "category_name" in allowed:
         name = _clean_category_name(values.get("category_name"))

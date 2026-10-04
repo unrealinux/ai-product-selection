@@ -222,7 +222,7 @@ def cmd_sensitivity(args: argparse.Namespace) -> int:
 
     print(f"快照 #{detail['id']}「{detail['label']}」（{detail['product_count']} 个商品）")
     print(f"权重重心：{describe(detail['weights'])}")
-    print(f"\n各维度影响力（把该维度权重归零后，与原排名的相关性 ρ）：")
+    print("\n各维度影响力（把该维度权重归零后，与原排名的相关性 ρ）：")
     if not impacts:
         print("  该快照只有一个非零维度，把它归零后所有商品分数相同、排名无意义，")
         print("  因此没有可计算的影响力数据。请先用包含多个维度的权重创建快照。")

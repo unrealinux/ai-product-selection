@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Optional
 
-from . import db, llm
+from . import db, llm, outcomes
 from .config import settings
 from .models import Product, ProductIn
 from .scoring import grade_of, rule_score
@@ -284,3 +284,86 @@ def import_table(path, mapping: Optional[dict[str, Any]] = None,
         "warnings": list(result.warnings),
         "provenance": result.provenance,
     }
+
+
+# --------------------------------------------------------------------------- #
+# 效果回测：经营结果录入与「哪套权重更赚钱」
+# --------------------------------------------------------------------------- #
+
+
+def _parse_day(value: Any, name: str) -> str:
+    """把日期统一成 ``YYYY-MM-DD``；解析不了就报错，不静默落库。"""
+    parsed = outcomes.parse_day(value)
+    if parsed is None:
+        raise ValueError(f"{name} 需要 YYYY-MM-DD 格式，收到 {value!r}")
+    return parsed
+
+
+def record_outcome(product_id: int, window_start: Any, window_end: Any,
+                   **fields: Any) -> dict[str, Any]:
+    """录入一段经营结果（商品必须存在，数值不得为负）。"""
+    if db.get_product(product_id) is None:
+        raise KeyError(f"商品 {product_id} 不存在")
+
+    start = _parse_day(window_start, "window_start")
+    end = _parse_day(window_end, "window_end")
+    if start > end:
+        raise ValueError("window_start 不能晚于 window_end")
+
+    negative = [
+        name for name in db.OUTCOME_NUMERIC_FIELDS
+        if name in fields and float(fields.get(name) or 0) < 0
+    ]
+    if negative:
+        raise ValueError("结果数值不能为负：" + "、".join(negative))
+
+    return db.upsert_outcome(product_id, start, end, **fields)
+
+
+def list_outcomes(product_id: Optional[int] = None,
+                  limit: int = 1000) -> list[dict[str, Any]]:
+    return db.list_outcomes(product_id=product_id, limit=limit)
+
+
+def delete_outcome(outcome_id: int) -> bool:
+    return db.delete_outcome(outcome_id)
+
+
+def record_decision(product_id: int, run_id: Optional[int] = None,
+                    action: str = "push", note: str = "") -> dict[str, Any]:
+    """记录一次选品决策（推 / 压 / 拒）。"""
+    if db.get_product(product_id) is None:
+        raise KeyError(f"商品 {product_id} 不存在")
+    if action not in {"push", "hold", "skip"}:
+        raise ValueError(f"未知行动 {action!r}，可选：push / hold / skip")
+    if run_id is not None and db.get_run(run_id) is None:
+        raise KeyError(f"快照 {run_id} 不存在")
+    return db.record_decision(product_id, run_id=run_id, action=action, note=note)
+
+
+def list_decisions(run_id: Optional[int] = None,
+                   product_id: Optional[int] = None) -> list[dict[str, Any]]:
+    return db.list_decisions(run_id=run_id, product_id=product_id)
+
+
+def backtest_run(run_id: int, metric: str = outcomes.DEFAULT_METRIC,
+                 top_ratio: float = 0.3) -> Any:
+    """把一次打分快照与已录入的经营结果对照。"""
+    run = db.get_run(run_id)
+    if run is None:
+        raise KeyError(f"快照 {run_id} 不存在")
+    if metric not in outcomes.METRICS:
+        # 指标名写错是调用方的问题，应与「快照不存在」区分开
+        raise ValueError(f"未知指标 {metric!r}，可选：{', '.join(outcomes.METRICS)}")
+    return outcomes.backtest(
+        run, db.get_run_items(run_id), db.list_outcomes(),
+        metric=metric, top_ratio=top_ratio,
+    )
+
+
+def compare_backtests(run_a: int, run_b: int, metric: str = outcomes.DEFAULT_METRIC,
+                      top_ratio: float = 0.3) -> Any:
+    """对比两次快照谁更能预测同一项经营指标。"""
+    left = backtest_run(run_a, metric=metric, top_ratio=top_ratio)
+    right = backtest_run(run_b, metric=metric, top_ratio=top_ratio)
+    return outcomes.compare_backtests(left, right)

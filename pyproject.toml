@@ -9,3 +9,16 @@ license = { text = "MIT" }
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+exclude = [".venv", "data", "__pycache__"]
+
+[tool.ruff.lint]
+# 只开真正能抓 bug 的规则：E/F/W。
+# F 会抓出未定义名字、未使用导入、变量遮蔽 —— 这些在无类型检查的项目里最容易漏。
+select = ["E", "F", "W"]
+ignore = [
+    "E501",  # 行宽交给 formatter 的直觉，不阻塞 CI
+]

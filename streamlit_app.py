@@ -6,12 +6,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
 
-from app import __version__, crawler, db, llm, service
+from app import __version__, crawler, db, llm, outcomes, service
 from app.config import DIMENSION_LABELS, settings
 from app.enrich import PROVENANCE_SEP, enrich
 from app.models import ProductIn
@@ -665,7 +665,6 @@ def page_costlink() -> None:
         apply_matches,
         link_costs,
         margin_report,
-        title_similarity,
     )
 
     products = db.list_products(limit=5000)
@@ -867,6 +866,197 @@ def page_stats() -> None:
         f"AI 选品库 v{__version__} ｜ 数据库：`{settings.db_path}` ｜ "
         f"LLM：{'已启用 ' + settings.llm_model if llm.is_available() else '未启用（纯规则打分）'}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# 效果回测：真实经营结果 vs 打分排序
+# --------------------------------------------------------------------------- #
+
+def _outcome_rows(limit: int = 200) -> list[dict]:
+    return service.list_outcomes(limit=limit)
+
+
+def backtest_record_outcome() -> None:
+    """① 录入经营结果。"""
+    st.caption(
+        "录入每个商品在某个时间段的真实表现（曝光 / 点击 / 订单 / 成交额 / 成本 / 推广花费）。"
+        "同一商品同一时间段重复提交会覆盖，不会叠加。"
+    )
+    products = db.list_products(limit=500)
+    if not products:
+        st.info("还没有商品。先去「➕ 商品录入」或「📥 数据导入」添加商品。")
+        return
+    by_id = {product.id: product for product in products}
+
+    with st.form("outcome_form"):
+        product_id = st.selectbox(
+            "商品", options=list(by_id),
+            format_func=lambda pid: f"#{pid} {by_id[pid].title}",
+        )
+        col1, col2 = st.columns(2)
+        start = col1.date_input("统计开始", value=date.today() - timedelta(days=30))
+        end = col2.date_input("统计结束", value=date.today())
+
+        c1, c2, c3, c4 = st.columns(4)
+        impressions = c1.number_input("曝光", min_value=0.0, step=100.0)
+        clicks = c2.number_input("点击", min_value=0.0, step=10.0)
+        orders = c3.number_input("订单数", min_value=0.0, step=1.0)
+        units = c4.number_input("销量(件)", min_value=0.0, step=1.0)
+        c5, c6, c7, c8 = st.columns(4)
+        returns = c5.number_input("退货件数", min_value=0.0, step=1.0)
+        revenue = c6.number_input("成交金额(元)", min_value=0.0, step=100.0)
+        cogs = c7.number_input("采购成本(元)", min_value=0.0, step=50.0)
+        ad_spend = c8.number_input("推广花费(元)", min_value=0.0, step=50.0)
+
+        source = st.text_input("数据来源", value="手工录入")
+        note = st.text_input("备注", value="")
+        submitted = st.form_submit_button("保存这段结果", type="primary")
+
+    if submitted:
+        try:
+            service.record_outcome(
+                product_id, start, end,
+                impressions=impressions, clicks=clicks, orders=orders, units=units,
+                returns=returns, revenue=revenue, cogs=cogs, ad_spend=ad_spend,
+                source=source or "手工录入", note=note,
+            )
+        except (ValueError, KeyError) as exc:
+            st.error(str(exc))
+        else:
+            st.success(f"已保存 #{product_id}「{by_id[product_id].title}」的结果（{start} ~ {end}）")
+
+    rows = _outcome_rows()
+    st.divider()
+    st.markdown("**已录入的结果**")
+    if not rows:
+        st.caption("还没有结果数据。回测至少需要 5 个商品有结果，否则只会给出「样本不足」的提示。")
+        return
+
+    labels = {
+        row["id"]: f"#{row['id']} {by_id.get(row['product_id']).title if row['product_id'] in by_id else row['product_id']}"
+        f"　{row['window_start']} ~ {row['window_end']}"
+        for row in rows
+    }
+    delete_target = st.selectbox(
+        "删除某条记录", options=[None, *labels],
+        format_func=lambda oid: "（不删除）" if oid is None else labels[oid],
+    )
+    if delete_target is not None and st.button("删除这条"):
+        if service.delete_outcome(delete_target):
+            st.success(f"已删除 #{delete_target}")
+            rows = _outcome_rows()
+
+    frame = pd.DataFrame([
+        {
+            "商品": by_id[row["product_id"]].title if row["product_id"] in by_id else row["product_id"],
+            "窗口": f"{row['window_start']} ~ {row['window_end']}",
+            "曝光": row["impressions"], "点击": row["clicks"], "订单": row["orders"],
+            "成交额": row["revenue"], "采购成本": row["cogs"], "推广花费": row["ad_spend"],
+            "毛利额": round(row["revenue"] - row["cogs"] - row["ad_spend"], 1),
+            "来源": row["source"],
+        }
+        for row in rows
+    ])
+    st.dataframe(frame, width="stretch", hide_index=True, height=280)
+
+
+def _run_options() -> dict[int, str]:
+    return {
+        run["id"]: f"#{run['id']} {run['label']}（商品 {run['product_count']}，均分 {run['avg_score']:.1f}）"
+        for run in service.list_snapshots(limit=100)
+    }
+
+
+def _metric_selectbox(label: str, key: str) -> str:
+    return st.selectbox(
+        label, options=list(outcomes.METRICS), key=key,
+        format_func=lambda name: f"{outcomes.metric_label(name)}"
+        + ("" if outcomes.metric_higher_better(name) else "（越低越好）"),
+    )
+
+
+def _render_backtest(result) -> None:
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("可比商品", result.sample_size)
+    col2.metric("Spearman ρ", f"{result.rho:.4f}" if result.rho is not None else "—")
+    col3.metric(f"Top{result.top_n} 均值", outcomes.format_metric(result.metric, result.top_avg))
+    col4.metric("倍差（Top ÷ 其余）", f"{result.lift:.2f}×" if result.lift is not None else "—")
+
+    (st.success if result.verdict and "帮倒忙" not in result.verdict else st.warning)(result.verdict)
+    for note in result.notes:
+        st.caption(f"⚠️ {note}")
+
+    if not result.rows:
+        return
+    frame = pd.DataFrame([
+        {
+            "排名": row.rank,
+            "总分": round(row.score, 2),
+            outcomes.metric_label(result.metric): round(row.value(result.metric), 4),
+            "商品": row.title,
+        }
+        for row in sorted(result.rows, key=lambda item: item.rank)
+    ])
+    st.dataframe(frame, width="stretch", hide_index=True, height=320)
+
+
+def backtest_view() -> None:
+    """② 用真实结果回测一次快照。"""
+    runs = _run_options()
+    if not runs:
+        st.info("还没有打分快照。去「⚖️ 权重调参 → ② 打分快照」建一个再回来。")
+        return
+
+    col1, col2, col3 = st.columns([2, 2, 1])
+    run_id = col1.selectbox("打分快照", options=list(runs), format_func=lambda rid: runs[rid])
+    metric = _metric_selectbox("结果指标", key="backtest_metric")
+    top_ratio = col3.slider("Top 组占比", 0.1, 1.0, 0.3, 0.05)
+
+    result = service.backtest_run(run_id, metric=metric, top_ratio=top_ratio)
+    _render_backtest(result)
+
+
+def backtest_compare_view() -> None:
+    """③ 两套权重谁更能预测结果。"""
+    runs = _run_options()
+    if len(runs) < 2:
+        st.info("需要至少两个打分快照才能对比。")
+        return
+
+    ids = list(runs)
+    col1, col2, col3 = st.columns([2, 2, 2])
+    run_a = col1.selectbox("快照 A", options=ids, index=0, format_func=lambda rid: runs[rid])
+    run_b = col2.selectbox("快照 B", options=ids, index=1, format_func=lambda rid: runs[rid])
+    metric = _metric_selectbox("结果指标", key="backtest_compare_metric")
+
+    comparison = service.compare_backtests(run_a, run_b, metric=metric)
+    st.success(comparison.summary())
+
+    left_col, right_col = st.columns(2)
+    for column, result in ((left_col, comparison.left), (right_col, comparison.right)):
+        with column:
+            st.markdown(f"**{result.run_label}**")
+            st.metric("方向校正后的 ρ",
+                      f"{result.signed_rho:.4f}" if result.signed_rho is not None else "—")
+            st.metric("可比商品", result.sample_size)
+            st.caption(result.verdict)
+
+
+def page_backtest() -> None:
+    st.subheader("效果回测")
+    st.caption(
+        "用真实经营结果检验「哪套权重更赚钱」。"
+        "评分排序只能回答「谁更值得试」，只有结果能回答「谁真的赚钱」。\n\n"
+        "⚠️ **这是相关性，不是因果。** 被推的商品本身可能就更好卖。结论只适合用来"
+        "筛掉明显帮倒忙的权重，不能当成「提升了 x% 利润」的证据。"
+    )
+    tabs = st.tabs(["① 录入结果", "② 回测", "③ 权重对比"])
+    with tabs[0]:
+        backtest_record_outcome()
+    with tabs[1]:
+        backtest_view()
+    with tabs[2]:
+        backtest_compare_view()
 
 
 # --------------------------------------------------------------------------- #
@@ -1184,7 +1374,7 @@ def main() -> None:
     st.caption("规则引擎 + 大模型的多维度选品打分与排序")
 
     tabs = st.tabs(["📊 选品榜单", "📥 数据导入", "📄 表格导入", "🎯 抖音拉取", "🛒 淘宝拉取",
-                    "🔗 成本对齐", "⚖️ 权重调参", "➕ 商品录入", "📈 数据概览"])
+                    "🔗 成本对齐", "⚖️ 权重调参", "🎯 效果回测", "➕ 商品录入", "📈 数据概览"])
     with tabs[0]:
         page_leaderboard()
     with tabs[1]:
@@ -1200,8 +1390,10 @@ def main() -> None:
     with tabs[6]:
         page_tuning()
     with tabs[7]:
-        page_create()
+        page_backtest()
     with tabs[8]:
+        page_create()
+    with tabs[9]:
         page_stats()
 
 
