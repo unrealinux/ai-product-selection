@@ -820,11 +820,15 @@ python scripts/tune_weights.py --save 我的方案 --weights "毛利率=0.4,需�
 python scripts/record_outcome.py --file 生意参谋导出.csv --preview
 python scripts/record_outcome.py --file 生意参谋导出.csv --import --source 生意参谋
 
-# 2) 回测某个快照
+# 2) 体检：结果数据够不够、有没有明显问题
+python scripts/backtest.py --doctor
+
+# 3) 回测某个快照
 python scripts/backtest.py --runs
 python scripts/backtest.py --run 1 --metric gross_profit
+python scripts/backtest.py --run 1 --metric gross_profit --after-run-only   # 推荐
 
-# 3) 两套权重谁更能预测结果
+# 4) 两套权重谁更能预测结果
 python scripts/backtest.py --compare 1 2 --metric orders
 
 # 不知道结果表该长什么样？
@@ -839,12 +843,77 @@ Streamlit 的 **🎯 效果回测** 页签有同样的流程：录入结果（�
 
 | 列 | 说明 |
 | --- | --- |
-| 商品ID / 商品标题 | 二选一，用于匹配商品；ID 匹配优先 |
+| 商品ID / 平台商品ID | 用于匹配商品，**平台 ID 也能直接用**（见下） |
+| 商品标题 | 没有 ID 列时靠标题匹配 |
+| 日期 | 单日导出：起止日都取这一天 |
 | 开始日期 / 结束日期 | 支持 `2024-03-01` / `2024/3/1`；表里没有就用 `--start --end` |
-| 曝光 / 点击 / 订单数 / 销量 / 退货件数 | 计数 |
-| 成交金额 / 采购成本 / 推广花费 | 金额（元） |
+| 商品曝光 / 商品点击 / 支付件数 / 支付金额 / 推广花费 / 采购成本 / 成功退款笔数 | 直接用后台导出的列名，已内置识别 |
 
 同一 `(商品, 起止日期)` 重复导入是**更新**而不是新增，所以同一份报表可以反复导。
+
+#### 商品是怎么匹配上的
+
+真实导出表里的「商品ID」是**平台的 ID**（淘宝 itemId / 抖店 product_id），
+本库把它存在 `external_id` 里 —— 所以两条路都会试。每行都会告诉你是靠哪个键匹配的：
+
+| 顺序 | 匹配方式 | 说明 |
+| --- | --- | --- |
+| 1 | 平台商品ID | 表里的 ID 与本库 `external_id` 一致 |
+| 2 | 库内主键 | 整串是数字且等于本库主键（自己导出的模板） |
+| 3 | 标题精确 | 完全一致 |
+| 4 | 标题模糊 | 二元组相似度 ≥ `--title-threshold`（默认 0.75），复用成本对齐那套算法 |
+| — | 匹配不上 | 逐条列出，**不静默写入 0** |
+
+模糊匹配会一并列出**歧义候选**（与最佳候选相差 ≤ 0.05），因为它们很可能真的分不出来。
+实测：`【爆款】304不锈钢保温杯 500ml 便携 包邮 厂家直销` 与库内标题归一化后
+相似度 **1.000**（营销词先被剔除）。
+
+> `A002` 这类含数字的货号**不会**被误当成主键 2 —— 只有整串是数字才当主键。
+
+### 回测前先体检
+
+```bash
+python scripts/backtest.py --doctor
+```
+
+```
+=== 商品与结果 ===
+  商品 6 个｜有结果 6 个（覆盖 100%）
+  结果记录 6 条｜时间跨度 2024-01-15 ~ 2026-10-04
+
+=== 打分快照 ===
+  ✅ #1 基线-均衡   商品 6   可比 6   创建于 2026-10-04
+
+=== 结论 ===
+  1. ⚠️  3 条结果的开始日早于最新快照（2026-10-04）。打分发生在结果之后不构成预测
+          —— 回测时加 --after-run-only。
+```
+
+它会检查：结果覆盖率、商品有没有成本（未做成本对齐时毛利类指标不可信）、
+全 0 的脏行、有成交额但无成本、样本是否达到 5 个、以及**时间先后**。
+
+### 时间校验：打分必须发生在结果之前
+
+这是最容易忽略、也最致命的一个问题：拿「上个月已经卖出去的销量」去验证
+「本月才打的分」，根本不构成预测 —— 但相关系数照样能算出 1.00。
+
+| 情况 | 行为 |
+| --- | --- |
+| 结果窗口开始日早于快照 | 默认仍纳入，但**显式警告**并指出建议 |
+| 加 `--after-run-only` | 只保留快照创建**之后**的窗口，其余商品排除并计数 |
+| 时间解析不出来 | 不武断排除，按原样纳入 |
+
+实测对比（同一批数据）：
+
+```
+默认：      可比商品 6 个；Spearman ρ = 1.0000；打分与结果同向 —— 权重可用。
+            ⚠️ 3 个商品的结果窗口早于快照创建时间（2026-10-04）
+--after-run-only：可比商品 3 个；样本不足（少于 5 个可比商品），结论仅供参考。
+            ⚠️ 已只采用快照创建之后的结果窗口，排除 3 个商品。
+```
+
+默认那条会告诉你「权重可用」，但其中一半证据来自打分**之前**的结果。
+所以结论里优先看 `--after-run-only` 的那一行。
 
 ### 可回测的指标
 
@@ -925,7 +994,7 @@ curl -X POST http://127.0.0.1:8000/decisions -H "Content-Type: application/json"
 | `DELETE` | `/outcomes/{id}` | 删除经营结果 |
 | `POST` | `/decisions` | 记录选品决策（push / hold / skip） |
 | `GET` | `/decisions` | 决策记录列表 |
-| `GET` | `/runs/{id}/backtest` | 用真实结果回测该快照 |
+| `GET` | `/runs/{id}/backtest` | 用真实结果回测该快照（`after_run_only=true` 只看快照之后的结果） |
 | `GET` | `/backtest/compare` | 对比两次快照的预测力 |
 | `GET` | `/douyin/status` | 抖音数据源配置状态 + 官返回码释义 |
 | `POST` | `/douyin/token` | 换取 access_token（调试用，结果不落盘） |
@@ -1023,6 +1092,7 @@ ai-product-selection/
 │   ├── weights.py     # 权重方案：预设 / 校验 / 归一化
 │   ├── compare.py     # 快照对比与维度影响力（Spearman / Top-N 重合）
 │   ├── outcomes.py    # 效果回测：指标聚合 / 相关性 / Top vs 其余（纯函数）
+│   ├── outcome_import.py # 结果表列识别 + 平台ID/标题模糊匹配
 │   ├── tabular.py     # 表格导入：列名识别 / 单位换算 / 缺列推导
 │   ├── costlink.py    # 成本对齐：标题相似度匹配 + 负毛利诊断
 │   ├── match_review.py # 低置信匹配的大模型复核（灰区判定 + 缓存）
@@ -1057,6 +1127,7 @@ ai-product-selection/
 │   ├── test_service.py
 │   ├── test_api.py
 │   ├── test_outcomes.py
+│   ├── test_outcome_import.py
 │   ├── test_match_review.py
 │   ├── test_imagehash.py
 │   ├── test_image_review.py

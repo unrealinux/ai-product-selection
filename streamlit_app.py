@@ -1065,6 +1065,8 @@ def _render_backtest(result) -> None:
     col2.metric("Spearman ρ", f"{result.rho:.4f}" if result.rho is not None else "—")
     col3.metric(f"Top{result.top_n} 均值", outcomes.format_metric(result.metric, result.top_avg))
     col4.metric("倍差（Top ÷ 其余）", f"{result.lift:.2f}×" if result.lift is not None else "—")
+    if result.excluded_before_run:
+        st.caption(f"已排除 {result.excluded_before_run} 个商品：它们的结果窗口全部早于该快照。")
 
     (st.success if result.verdict and "帮倒忙" not in result.verdict else st.warning)(result.verdict)
     for note in result.notes:
@@ -1095,8 +1097,15 @@ def backtest_view() -> None:
     run_id = col1.selectbox("打分快照", options=list(runs), format_func=lambda rid: runs[rid])
     metric = _metric_selectbox("结果指标", key="backtest_metric")
     top_ratio = col3.slider("Top 组占比", 0.1, 1.0, 0.3, 0.05)
+    after_run_only = st.checkbox(
+        "只采用快照创建之后的结果（推荐）",
+        value=True,
+        key="backtest_after_run",
+        help="打分发生在结果之后就不构成预测。默认只看快照创建之后的窗口。",
+    )
 
-    result = service.backtest_run(run_id, metric=metric, top_ratio=top_ratio)
+    result = service.backtest_run(run_id, metric=metric, top_ratio=top_ratio,
+                                  after_run_only=after_run_only)
     _render_backtest(result)
 
 
@@ -1112,8 +1121,14 @@ def backtest_compare_view() -> None:
     run_a = col1.selectbox("快照 A", options=ids, index=0, format_func=lambda rid: runs[rid])
     run_b = col2.selectbox("快照 B", options=ids, index=1, format_func=lambda rid: runs[rid])
     metric = _metric_selectbox("结果指标", key="backtest_compare_metric")
+    after_run_only = st.checkbox(
+        "只采用快照创建之后的结果（推荐）", value=True,
+        key="backtest_compare_after_run",
+        help="打分发生在结果之后就不构成预测。",
+    )
 
-    comparison = service.compare_backtests(run_a, run_b, metric=metric)
+    comparison = service.compare_backtests(run_a, run_b, metric=metric,
+                                           after_run_only=after_run_only)
     st.success(comparison.summary())
 
     left_col, right_col = st.columns(2)

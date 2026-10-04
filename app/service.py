@@ -347,8 +347,13 @@ def list_decisions(run_id: Optional[int] = None,
 
 
 def backtest_run(run_id: int, metric: str = outcomes.DEFAULT_METRIC,
-                 top_ratio: float = 0.3) -> Any:
-    """把一次打分快照与已录入的经营结果对照。"""
+                 top_ratio: float = 0.3,
+                 after_run_only: bool = False) -> Any:
+    """把一次打分快照与已录入的经营结果对照。
+
+    ``after_run_only=True`` 时只采用快照创建之后的结果窗口 ——
+    打分发生在结果之后就不构成预测。
+    """
     run = db.get_run(run_id)
     if run is None:
         raise KeyError(f"快照 {run_id} 不存在")
@@ -357,13 +362,16 @@ def backtest_run(run_id: int, metric: str = outcomes.DEFAULT_METRIC,
         raise ValueError(f"未知指标 {metric!r}，可选：{', '.join(outcomes.METRICS)}")
     return outcomes.backtest(
         run, db.get_run_items(run_id), db.list_outcomes(),
-        metric=metric, top_ratio=top_ratio,
+        metric=metric, top_ratio=top_ratio, after_run_only=after_run_only,
     )
 
 
 def compare_backtests(run_a: int, run_b: int, metric: str = outcomes.DEFAULT_METRIC,
-                      top_ratio: float = 0.3) -> Any:
+                      top_ratio: float = 0.3,
+                      after_run_only: bool = False) -> Any:
     """对比两次快照谁更能预测同一项经营指标。"""
-    left = backtest_run(run_a, metric=metric, top_ratio=top_ratio)
-    right = backtest_run(run_b, metric=metric, top_ratio=top_ratio)
+    left = backtest_run(run_a, metric=metric, top_ratio=top_ratio,
+                        after_run_only=after_run_only)
+    right = backtest_run(run_b, metric=metric, top_ratio=top_ratio,
+                         after_run_only=after_run_only)
     return outcomes.compare_backtests(left, right)

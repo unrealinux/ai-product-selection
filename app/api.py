@@ -401,9 +401,13 @@ def run_backtest(
     run_id: int,
     metric: str = Query(outcomes.DEFAULT_METRIC, description="指标名，见 /metrics"),
     top_ratio: float = Query(0.3, gt=0, le=1, description="Top 组占比"),
+    after_run_only: bool = Query(
+        False, description="只采用快照创建之后的结果窗口（推荐：打分之后的结果才构成预测）"
+    ),
 ) -> dict[str, Any]:
     try:
-        result = service.backtest_run(run_id, metric=metric, top_ratio=top_ratio)
+        result = service.backtest_run(run_id, metric=metric, top_ratio=top_ratio,
+                                      after_run_only=after_run_only)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -417,10 +421,12 @@ def compare_backtest(
     run_b: int = Query(..., description="快照 B 的 id"),
     metric: str = Query(outcomes.DEFAULT_METRIC),
     top_ratio: float = Query(0.3, gt=0, le=1),
+    after_run_only: bool = Query(False),
 ) -> dict[str, Any]:
     try:
         comparison = service.compare_backtests(
-            run_a, run_b, metric=metric, top_ratio=top_ratio
+            run_a, run_b, metric=metric, top_ratio=top_ratio,
+            after_run_only=after_run_only,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

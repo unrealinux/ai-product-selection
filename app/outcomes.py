@@ -24,7 +24,7 @@ import math
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from .compare import spearman
 from .tabular import parse_number
@@ -237,6 +237,8 @@ class BacktestResult:
     top_avg: float | None = None
     rest_avg: float | None = None
     lift: float | None = None
+    #: 因结果窗口全部早于快照而被排除的商品数（``after_run_only`` 时才发生）
+    excluded_before_run: int = 0
     verdict: str = ""
     notes: list[str] = field(default_factory=list)
 
@@ -278,6 +280,7 @@ class BacktestResult:
             "metric_label": metric_label(self.metric),
             "sample_size": self.sample_size,
             "top_ratio": self.top_ratio,
+            "excluded_before_run": self.excluded_before_run,
             "top_n": self.top_n,
             "rho": self.rho,
             "signed_rho": self.signed_rho,
@@ -320,21 +323,31 @@ def _verdict_for(result: BacktestResult) -> str:
     return f"打分与结果关联很弱（ρ={signed:.2f}）—— 权重区分度不足或样本太杂"
 
 
+def _window_start_day(row: Mapping[str, Any]) -> Optional[str]:
+    """结果的窗口开始日（统一成 YYYY-MM-DD）；解析不出返回 None。"""
+    return parse_day(row.get("window_start"))
+
+
 def backtest(
     run: Mapping[str, Any],
     items: Iterable[Mapping[str, Any]],
     outcomes: Iterable[Mapping[str, Any]],
     metric: str = DEFAULT_METRIC,
     top_ratio: float = 0.3,
+    *,
+    after_run_only: bool = False,
 ) -> BacktestResult:
     """把一次打分快照与经营结果对照。
 
     Args:
-        run: 快照记录（至少含 ``id`` / ``label``）。
+        run: 快照记录（至少含 ``id`` / ``label``；有 ``created_at`` 时做时间校验）。
         items: 快照条目（含 ``product_id`` / ``total`` / ``rank_no`` / ``title``）。
         outcomes: 结果记录，每条含 ``product_id`` 与原始量字段。
         metric: :data:`METRICS` 中的指标名。
         top_ratio: Top 组占可比样本的比例（0-1）。
+        after_run_only: 只采用**开始于快照创建之后**的结果窗口。
+            默认为 False，但只要有窗口早于快照就会提示 —— 打分发生在结果之后
+            就不构成预测，相关性没有意义。
 
     Returns:
         :class:`BacktestResult`；没有共同商品时 ``rows`` 为空，不抛异常。
@@ -345,21 +358,41 @@ def backtest(
         raise ValueError("top_ratio 必须在 (0, 1] 区间")
 
     grouped = group_by_product(outcomes)
+    run_day = parse_day(run.get("created_at")) if run.get("created_at") else None
 
-    rows: list[BacktestRow] = []
+    # 一个商品可能出现在多行 item 里，取第一条
+    item_by_product: dict[int, Mapping[str, Any]] = {}
     for item in items:
         try:
             product_id = int(item["product_id"])
         except (KeyError, TypeError, ValueError):
             continue
-        if product_id not in grouped:
+        item_by_product.setdefault(product_id, item)
+
+    rows: list[BacktestRow] = []
+    predating_products = 0
+    dropped_before_run: set[int] = set()
+    for product_id, item in item_by_product.items():
+        raw_rows = grouped.get(product_id)
+        if not raw_rows:
             continue  # 没有结果数据的商品不参与回测，而不是拿 0 顶替
+
+        if run_day:
+            early = [row for row in raw_rows if (_window_start_day(row) or run_day) < run_day]
+            if early:
+                predating_products += 1
+                if after_run_only:
+                    raw_rows = [row for row in raw_rows if row not in early]
+                    if not raw_rows:
+                        dropped_before_run.add(product_id)
+                        continue
+
         rows.append(BacktestRow(
             product_id=product_id,
             title=str(item.get("title") or ""),
             score=float(item.get("total") or 0.0),
             rank=int(item.get("rank_no") or len(rows) + 1),
-            metrics=aggregate_outcomes(grouped[product_id]),
+            metrics=aggregate_outcomes(raw_rows),
         ))
 
     result = BacktestResult(
@@ -368,6 +401,7 @@ def backtest(
         metric=metric,
         rows=rows,
         top_ratio=top_ratio,
+        excluded_before_run=len(dropped_before_run),
     )
     if not rows:
         result.verdict = "没有可比数据"
@@ -375,6 +409,18 @@ def backtest(
             "需要先为这些商品录入经营结果（scripts/record_outcome.py 或 POST /outcomes）。"
         )
         return result
+
+    if run_day and predating_products:
+        if after_run_only:
+            result.notes.append(
+                f"已只采用快照创建（{run_day}）之后的结果窗口，"
+                f"排除 {result.excluded_before_run} 个商品。"
+            )
+        else:
+            result.notes.append(
+                f"{predating_products} 个商品的结果窗口早于快照创建时间（{run_day}）—— "
+                "打分发生在结果之后就不构成预测。建议加 --after-run-only 只看快照之后的数据。"
+            )
 
     values = [row.value(metric) for row in rows]
     scores = [row.score for row in rows]

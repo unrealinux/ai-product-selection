@@ -3,11 +3,17 @@
     # 有哪些指标可回测
     python scripts/backtest.py --metrics
 
+    # 体检：结果数据够不够、有没有明显问题
+    python scripts/backtest.py --doctor
+
     # 看有哪些快照可回测
     python scripts/backtest.py --runs
 
     # 回测单个快照（默认指标：毛利额）
     python scripts/backtest.py --run 1 --metric gross_profit
+
+    # 只采用快照创建之后的结果窗口（推荐：打分之后的结果才构成预测）
+    python scripts/backtest.py --run 1 --metric gross_profit --after-run-only
 
     # 对比两套权重谁更能预测结果
     python scripts/backtest.py --compare 1 2 --metric orders
@@ -57,6 +63,10 @@ def parse_args() -> argparse.Namespace:
                         help=f"回测指标，默认 {DEFAULT_METRIC}")
     parser.add_argument("--top-ratio", type=float, default=0.3,
                         help="Top 组占比，默认 0.3")
+    parser.add_argument("--after-run-only", action="store_true",
+                        help="只采用快照创建之后的结果窗口（推荐：打分之后的结果才构成预测）")
+    parser.add_argument("--doctor", action="store_true",
+                        help="体检：检查结果数据够不够回测、有没有明显问题")
     parser.add_argument("--top", type=int, default=20, help="最多打印几行，默认 20")
     parser.add_argument("--template", action="store_true", help="打印结果表 CSV 模板")
     return parser.parse_args()
@@ -109,6 +119,92 @@ def print_result(result, top: int) -> None:
         print(f"  ⚠️  {note}")
 
 
+def cmd_doctor() -> int:
+    """回测前的体检：数据够不够、有没有明显问题。"""
+    from collections import Counter
+
+    from app import db
+    from app.outcomes import MIN_SAMPLE, parse_day
+
+    products = db.list_products(limit=100000)
+    outcomes = db.list_outcomes(limit=100000)
+    runs = service.list_snapshots(limit=100)
+
+    print("=== 商品与结果 ===")
+    with_outcome = {row["product_id"] for row in outcomes}
+    if products:
+        print(f"  商品 {len(products)} 个｜有结果 {len(with_outcome)} 个"
+              f"（覆盖 {len(with_outcome) / len(products):.0%}）")
+    else:
+        print("  库里没有商品。")
+    if outcomes:
+        days = sorted(day for row in outcomes if (day := parse_day(row["window_start"])))
+        per_product = Counter(row["product_id"] for row in outcomes)
+        span = f"｜时间跨度 {days[0]} ~ {days[-1]}" if days else ""
+        print(f"  结果记录 {len(outcomes)} 条{span}")
+        print(f"  每个商品平均 {len(outcomes) / max(len(with_outcome), 1):.1f} 段"
+              f"（最多 {max(per_product.values())} 段）")
+
+    problems: list[str] = []
+    if not outcomes:
+        problems.append("还没有任何经营结果。先跑 scripts/record_outcome.py 导一版。")
+    else:
+        zero_rows = [row for row in outcomes
+                     if not any(float(row.get(f) or 0) for f in
+                                ("impressions", "clicks", "orders", "revenue"))]
+        if zero_rows:
+            problems.append(f"{len(zero_rows)} 条结果全部为 0 —— 可能是导错了列或抓错了行。")
+
+        no_cost = [row for row in outcomes
+                   if float(row.get("revenue") or 0) > 0 and float(row.get("cogs") or 0) <= 0]
+        if no_cost:
+            problems.append(
+                f"{len(no_cost)} 条有成交额但没有采购成本 —— 算出的「毛利额」会偏高，"
+                "建议把成本列也导进来。"
+            )
+        missing_cost_products = [p for p in products if p.cost <= 0]
+        if missing_cost_products:
+            problems.append(
+                f"{len(missing_cost_products)} 个商品没有成本（未做成本对齐）——"
+                "毛利类指标不可信，先跑 scripts/link_costs.py。"
+            )
+        if len(with_outcome) < MIN_SAMPLE:
+            problems.append(
+                f"只有 {len(with_outcome)} 个商品有结果，少于 {MIN_SAMPLE} 个时回测只会提示「样本不足」。"
+            )
+
+    print("\n=== 打分快照 ===")
+    if not runs:
+        print("  还没有快照。先建一个：python scripts/tune_weights.py --run \"基线\"")
+        problems.append("还没有打分快照，回测没有可比对象。")
+    else:
+        all_ids = {row["product_id"] for row in outcomes}
+        for run in runs:
+            items = db.get_run_items(run["id"])
+            comparable = sum(1 for item in items if item["product_id"] in all_ids)
+            flag = "✅" if comparable >= MIN_SAMPLE else "⚠️"
+            print(f"  {flag} #{run['id']} {run['label'][:24]:<26} 商品 {run['product_count']:<4}"
+                  f"可比 {comparable:<4} 创建于 {run['created_at']:%Y-%m-%d}")
+        newest = max(run["created_at"] for run in runs)
+        early = [row for row in outcomes
+                 if (parse_day(row["window_start"]) or "9999") < newest.strftime("%Y-%m-%d")]
+        if early:
+            problems.append(
+                f"{len(early)} 条结果的开始日早于最新快照（{newest:%Y-%m-%d}）。"
+                "打分发生在结果之后不构成预测 —— 回测时加 --after-run-only。"
+            )
+
+    print("\n=== 结论 ===")
+    if problems:
+        for index, problem in enumerate(problems, start=1):
+            print(f"  {index}. ⚠️  {problem}")
+    else:
+        print("  ✅ 数据看起来够用。跑："
+              f"python scripts/backtest.py --run {runs[0]['id']} "
+              "--metric gross_profit --after-run-only")
+    return 0
+
+
 def main() -> int:
     args = parse_args()
 
@@ -118,6 +214,8 @@ def main() -> int:
 
     service.prepare_db()
 
+    if args.doctor:
+        return cmd_doctor()
     if args.metrics:
         return cmd_metrics()
     if args.runs:
@@ -131,7 +229,8 @@ def main() -> int:
         run_a, run_b = args.compare
         try:
             comparison = service.compare_backtests(
-                run_a, run_b, metric=args.metric, top_ratio=args.top_ratio
+                run_a, run_b, metric=args.metric, top_ratio=args.top_ratio,
+                after_run_only=args.after_run_only,
             )
         except KeyError as exc:
             print(f"❌ {exc}")
@@ -151,7 +250,8 @@ def main() -> int:
 
     try:
         result = service.backtest_run(
-            args.run, metric=args.metric, top_ratio=args.top_ratio
+            args.run, metric=args.metric, top_ratio=args.top_ratio,
+            after_run_only=args.after_run_only,
         )
     except KeyError as exc:
         print(f"❌ {exc}")

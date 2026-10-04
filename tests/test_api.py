@@ -398,6 +398,10 @@ def test_backtest_endpoint(client):
     assert client.get(f"/runs/{run['id']}/backtest",
                       params={"top_ratio": 0}).status_code == 422
 
+    strict = client.get(f"/runs/{run['id']}/backtest",
+                        params={"metric": "gross_profit", "after_run_only": True}).json()
+    assert "excluded_before_run" in strict
+
 
 def test_backtest_compare_endpoint(client):
     ids = [create(client, f"商品{index}")["id"] for index in range(6)]

@@ -293,6 +293,79 @@ def test_compare_requires_same_metric():
 
 
 # --------------------------------------------------------------------------- #
+# 时间校验：打分必须发生在结果之前
+# --------------------------------------------------------------------------- #
+
+def run_dated(created_at: str) -> dict:
+    return {"id": 1, "label": "基线", "created_at": created_at}
+
+
+def test_backtest_warns_when_outcomes_predate_snapshot():
+    items = items_for([90, 80, 70, 60, 50, 40])
+    outcomes = [outcome(index, revenue=1000 - index * 100, window_start="2024-01-01")
+                for index in range(1, 7)]
+
+    result = backtest(run_dated("2024-03-01"), items, outcomes)
+
+    assert result.sample_size == 6  # 默认仍然纳入
+    assert any("早于快照" in note for note in result.notes)
+
+
+def test_after_run_only_excludes_predating_products():
+    items = items_for([90, 80, 70, 60, 50, 40])
+    outcomes = [outcome(index, revenue=1000 - index * 100, window_start="2024-01-01")
+                for index in range(1, 7)]
+
+    result = backtest(run_dated("2024-03-01"), items, outcomes, after_run_only=True)
+
+    assert result.rows == []
+    assert result.excluded_before_run == 6
+    assert result.verdict == "没有可比数据"
+
+
+def test_after_run_only_keeps_only_later_windows():
+    items = items_for([90, 80])
+    outcomes = [
+        outcome(1, revenue=1000.0, window_start="2024-01-01"),  # 早于快照
+        outcome(1, revenue=500.0, window_start="2024-04-01"),   # 快照之后
+        outcome(2, revenue=300.0, window_start="2024-04-01"),
+    ]
+
+    result = backtest(run_dated("2024-03-01"), items, outcomes, after_run_only=True)
+
+    assert result.sample_size == 2
+    by_id = {row.product_id: row for row in result.rows}
+    # 商品 1 只统计快照之后那一段，不能把 1000 也加进来
+    assert by_id[1].metrics.revenue == pytest.approx(500.0)
+    assert result.excluded_before_run == 0
+
+
+def test_no_temporal_note_without_created_at():
+    items = items_for([90, 80])
+    outcomes = [outcome(index, revenue=100.0, window_start="2024-01-01")
+                for index in (1, 2)]
+    result = backtest(run_stub(), items, outcomes)
+    assert not any("早于快照" in note for note in result.notes)
+
+
+def test_unparseable_window_is_not_treated_as_predating():
+    items = items_for([90, 80])
+    outcomes = [outcome(index, revenue=100.0, window_start="很久以前")
+                for index in (1, 2)]
+    result = backtest(run_dated("2024-03-01"), items, outcomes, after_run_only=True)
+    assert result.sample_size == 2  # 解析不出时间就不武断排除
+
+
+def test_excluded_before_run_is_serialised():
+    items = items_for([90, 80])
+    outcomes = [outcome(index, revenue=100.0, window_start="2024-01-01")
+                for index in (1, 2)]
+    payload = backtest(run_dated("2024-03-01"), items, outcomes,
+                       after_run_only=True).as_dict()
+    assert "excluded_before_run" in payload
+
+
+# --------------------------------------------------------------------------- #
 # 展示辅助
 # --------------------------------------------------------------------------- #
 

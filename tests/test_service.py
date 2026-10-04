@@ -422,3 +422,19 @@ def test_compare_backtests_end_to_end(temp_db):
 
     assert comparison.better in {"left", "right", "tie"}
     assert comparison.summary()
+
+
+def test_backtest_after_run_only_excludes_old_windows(temp_db):
+    """快照是现在创建的，2020 年的结果明显早于它 —— 不该参与回测。"""
+    products = seed(temp_db, titles=("A", "B", "C", "D", "E", "F"))
+    run = service.create_snapshot("均衡", profile="balanced")
+    for product in products:
+        service.record_outcome(product.id, "2020-01-01", "2020-01-31", revenue=100.0)
+
+    loose = service.backtest_run(run["id"], metric="gross_profit")
+    strict = service.backtest_run(run["id"], metric="gross_profit", after_run_only=True)
+
+    assert loose.sample_size == 6
+    assert any("早于快照" in note for note in loose.notes)
+    assert strict.sample_size == 0
+    assert strict.excluded_before_run == 6
